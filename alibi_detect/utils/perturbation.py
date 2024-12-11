@@ -1,62 +1,18 @@
-import cv2
-from io import BytesIO
-import numpy as np
-from PIL import Image
 import random
-from scipy.ndimage import zoom
-from scipy.ndimage.interpolation import map_coordinates
+from io import BytesIO
+from typing import List, Tuple, Union
+
+import cv2
+import numpy as np
 import skimage as sk
-from skimage.filters import gaussian
-import tensorflow as tf
-from typing import List, Tuple
 from alibi_detect.utils.data import Bunch
 from alibi_detect.utils.discretizer import Discretizer
 from alibi_detect.utils.distance import abdm, multidim_scaling
 from alibi_detect.utils.mapping import ohe2ord
-
-
-def mutate_categorical(X: np.ndarray,
-                       rate: float = None,
-                       seed: int = 0,
-                       feature_range: tuple = (0, 255)) -> tf.Tensor:
-    """
-    Randomly change integer feature values to values within a set range
-    with a specified permutation rate.
-
-    Parameters
-    ----------
-    X
-        Batch of data to be perturbed.
-    rate
-        Permutation rate (between 0 and 1).
-    seed
-        Random seed.
-    feature_range
-        Min and max range for perturbed features.
-
-    Returns
-    -------
-    Array with perturbed data.
-    """
-    frange = (feature_range[0] + 1, feature_range[1] + 1)
-    shape = X.shape
-    n_samples = np.prod(shape)
-    mask = tf.random.categorical(
-        tf.math.log([[1. - rate, rate]]),
-        n_samples,
-        seed=seed,
-        dtype=tf.int32
-    )
-    mask = tf.reshape(mask, shape)
-    possible_mutations = tf.random.uniform(
-        shape,
-        minval=frange[0],
-        maxval=frange[1],
-        dtype=tf.int32,
-        seed=seed + 1
-    )
-    X = tf.math.floormod(tf.cast(X, tf.int32) + mask * possible_mutations, frange[1])
-    return tf.cast(X, tf.float32)
+from PIL import Image
+from scipy.ndimage import zoom
+from scipy.ndimage.interpolation import map_coordinates
+from skimage.filters import gaussian
 
 
 def apply_mask(X: np.ndarray,
@@ -124,7 +80,7 @@ def apply_mask(X: np.ndarray,
     for _ in range(x_start.shape[0]):
 
         if mask_type == 'zero':
-            update_val = 0
+            update_val: Union[float, np.ndarray] = 0.0
         else:
             update_val = noise[_]
 
@@ -137,14 +93,14 @@ def apply_mask(X: np.ndarray,
             ] = update_val
 
     # apply masks to instances
-    X_mask = []
+    X_masks = []
     for _ in range(X_shape[0]):
         if mask_type == 'zero':
             X_mask_ = X[_].reshape((1,) + X_shape[1:]) * mask
         else:
             X_mask_ = np.clip(X[_].reshape((1,) + X_shape[1:]) + mask, clip_rng[0], clip_rng[1])
-        X_mask.append(X_mask_)
-    X_mask = np.concatenate(X_mask, axis=0)
+        X_masks.append(X_mask_)
+    X_mask = np.concatenate(X_masks, axis=0)
 
     return X_mask, mask
 
@@ -200,7 +156,7 @@ def inject_outlier_ts(X: np.ndarray,
         X_outlier[outlier_idx, s] += np.sign(rnd) * np.maximum(np.abs(rnd * n_std), min_std) * stdev
         is_outlier[outlier_idx] = 1
     if n_dim == 1:
-        X_outlier = X_outlier.reshape(n_samples,)
+        X_outlier = X_outlier.reshape(n_samples, )
     return Bunch(data=X_outlier, target=is_outlier, target_names=['normal', 'outlier'])
 
 
@@ -298,7 +254,7 @@ def inject_outlier_categorical(X: np.ndarray,
 
     Returns
     -------
-    Bunch object with the perturbed tabular data, outlier labels and
+    Bunch object with the perturbed tabular data, outlier labels and \
     a dictionary used to map categories to their furthest neighbour.
     """
     if cat_perturb is None:
@@ -376,6 +332,7 @@ def inject_outlier_categorical(X: np.ndarray,
                  cat_perturb=cat_perturb,
                  d_abs=d_abs,
                  target_names=['normal', 'outlier'])
+
 
 # Note: the perturbation functions below are adopted from
 # https://github.com/hendrycks/robustness/blob/master/ImageNet-C/imagenet_c/imagenet_c/corruptions.py
@@ -519,7 +476,7 @@ def impulse_noise(x: np.ndarray, amount: float, xrange: tuple = None) -> np.ndar
 
 
 # Blur
-def gaussian_blur(x: np.ndarray, sigma: float, multichannel: bool = True, xrange: tuple = None) -> np.ndarray:
+def gaussian_blur(x: np.ndarray, sigma: float, channel_axis: int = -1, xrange: tuple = None) -> np.ndarray:
     """
     Apply Gaussian blur.
 
@@ -529,8 +486,8 @@ def gaussian_blur(x: np.ndarray, sigma: float, multichannel: bool = True, xrange
         Instance to be perturbed.
     sigma
         Standard deviation determining the strength of the blur.
-    multichannel
-        Whether the image contains multiple channels (RGB) or not.
+    channel_axis
+        Denotes the axis of the colour channel. If `None` the image is assumed to be grayscale.
     xrange
         Tuple with min and max data range.
 
@@ -539,7 +496,7 @@ def gaussian_blur(x: np.ndarray, sigma: float, multichannel: bool = True, xrange
     Perturbed instance.
     """
     x, scale_back = scale_minmax(x, xrange)
-    x_gb = gaussian(x, sigma=sigma, multichannel=multichannel)
+    x_gb = gaussian(x, sigma=sigma, channel_axis=channel_axis)
     if scale_back:
         x_gb = x_gb * (xrange[1] - xrange[0]) + xrange[0]
     if isinstance(xrange, tuple):
@@ -633,14 +590,14 @@ def glass_blur(x: np.ndarray, sigma: float, max_delta: int, iterations: int, xra
     if xrange[0] != 0 or xrange[1] != 255:
         x = (x - xrange[0]) / (xrange[1] - xrange[0]) * 255
 
-    x = np.uint8(gaussian(x, sigma=sigma, multichannel=True))
+    x = gaussian(x, sigma=sigma, channel_axis=-1).astype(np.uint8)  # assume [h, w, c] image layout
     for i in range(iterations):
         for h in range(nrows - max_delta, max_delta, -1):
             for w in range(ncols - max_delta, max_delta, -1):
                 dx, dy = np.random.randint(-max_delta, max_delta, size=(2,))
                 h_prime, w_prime = h + dy, w + dx
                 x[h, w], x[h_prime, w_prime] = x[h_prime, w_prime], x[h, w]
-    x_gb = gaussian(x / 255, sigma=sigma, multichannel=True)
+    x_gb = gaussian(x / 255, sigma=sigma, channel_axis=-1)
     x_gb = x_gb * (xrange[1] - xrange[0]) + xrange[0]
     if isinstance(xrange, tuple):
         return np.clip(x_gb, xrange[0], xrange[1])
@@ -665,8 +622,8 @@ def disk(radius: float, alias_blur: float = 0.1, dtype=np.float32) -> np.ndarray
     -------
     Kernel used for Gaussian blurring.
     """
-    if radius <= 8:
-        L = np.arange(-8, 8 + 1)
+    if radius <= 8.:
+        L = np.arange(-8., 8. + 1)
         ksize = (3, 3)
     else:
         L = np.arange(-radius, radius + 1)
@@ -908,8 +865,8 @@ def pixelate(x: np.ndarray, strength: float, xrange: tuple = None) -> np.ndarray
         x = (x - xrange[0]) / (xrange[1] - xrange[0]) * 255
 
     im = Image.fromarray(x.astype('uint8'), mode='RGB')
-    im = im.resize((int(rows * strength), int(cols * strength)), Image.BOX)
-    im = im.resize((rows, cols), Image.BOX)
+    im = im.resize((int(rows * strength), int(cols * strength)), Image.Resampling.BOX)
+    im = im.resize((rows, cols), Image.Resampling.BOX)
     x_pi = np.array(im, dtype=np.float32) / 255
     x_pi = x_pi * (xrange[1] - xrange[0]) + xrange[0]
     return x_pi
@@ -938,11 +895,11 @@ def jpeg_compression(x: np.ndarray, strength: float, xrange: tuple = None) -> np
     if xrange[0] != 0 or xrange[1] != 255:
         x = (x - xrange[0]) / (xrange[1] - xrange[0]) * 255
 
-    x = Image.fromarray(x.astype('uint8'), mode='RGB')
+    x = Image.fromarray(x.astype('uint8'), mode='RGB')  # type: ignore[assignment]
     output = BytesIO()
-    x.save(output, 'JPEG', quality=strength)
-    x = Image.open(output)
-    x_jpeg = np.array(x, dtype=np.float32) / 255
+    x.save(output, 'JPEG', quality=strength)  # type: ignore[attr-defined] # TODO: allow redefinition
+    x_image = Image.open(output)
+    x_jpeg = np.array(x_image, dtype=np.float32) / 255
     x_jpeg = x_jpeg * (xrange[1] - xrange[0]) + xrange[0]
     return x_jpeg
 
@@ -978,11 +935,11 @@ def elastic_transform(x: np.ndarray, mult_dxdy: float, sigma: float,
     rnd_rng *= shape[0]
 
     # random affine
-    center_square = np.float32(shape_size) // 2
+    center_square = np.asarray(shape_size, dtype=np.float32) // 2
     square_size = min(shape_size) // 3
-    pts1 = np.float32([center_square + square_size,
+    pts1 = np.asarray([center_square + square_size,
                        [center_square[0] + square_size, center_square[1] - square_size],
-                       center_square - square_size])
+                       center_square - square_size], dtype=np.float32)
     pts2 = pts1 + np.random.uniform(-rnd_rng, rnd_rng, size=pts1.shape).astype(np.float32)
     M = cv2.getAffineTransform(pts1, pts2)
     image = cv2.warpAffine(x, M, shape_size[::-1], borderMode=cv2.BORDER_REFLECT_101)

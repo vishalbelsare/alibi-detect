@@ -87,7 +87,7 @@ also happens to be a case of *covariate drift*.
 :align: center
 :alt: 2D drift example
 ```
-
+<br/><br/>
 It is relatively easy to spot drift by eyeballing these figures here.
 However, the task becomes considerably harder for high-dimensional real
 problems, especially since real-time ground truths are not typically
@@ -208,7 +208,7 @@ Dimension reduction approaches can be broadly categorised under:
 high degree of flexibility here, with a user’s chosen dimension
 reduction technique able to be incorporated into their chosen detector
 via the `preprocess_fn` argument (and sometimes
-`preprocess_batch_fn` and `preprocess_x_ref`, depending on the
+`preprocess_batch_fn` and `preprocess_at_init`, depending on the
 detector). In the following sections, the three categories of techniques
 are briefly introduced. Alibi Detect offers the following functionality
 using either [TensorFlow](https://www.tensorflow.org/) or
@@ -274,11 +274,8 @@ the reconstruction loss, e.g. if MSE is used:
 $\phi, \psi = \text{arg} \min_{\phi, \psi}\, \lVert \mathbf{X}-(\phi \circ \psi)\mathbf{X}\rVert^2$.
 However, untrained (randomly initialised) autoencoders can also be used.
 For an example, a `pytorch` autoencoder can be incorporated into a
-detector by packaging it as a callable function using
-`preprocess_drift` (from
-[alibi_detect.cd.pytorch.preprocess](../api/alibi_detect.cd.pytorch.preprocess.rst))
-and `partial` (see
-[here](https://docs.python.org/3/library/functools.html#functools.partial)):
+detector by packaging it as a callable function using {func}`~alibi_detect.cd.pytorch.preprocess.preprocess_drift`
+and {func}`~functools.partial`: 
 
 ```python
 encoder_net = torch.nn.Sequential(...)
@@ -312,13 +309,10 @@ is encouraging since this allows the user to repurpose existing
 black-box models for use as drift detectors. The syntax for
 incorporating existing models into drift detectors is similar to the
 previous autoencoder example, with the added step of using
-`HiddenOutput`
-([alibi_detect.cd.tensorflow.preprocess](../api/alibi_detect.cd.tensorflow.preprocess.rst)
-or
-[alibi_detect.cd.pytorch.preprocess](../api/alibi_detect.cd.pytorch.preprocess.rst))
+{class}`~alibi_detect.cd.tensorflow.preprocess.HiddenOutput`
 to select the model’s network layer to extract outputs from. The code
 snippet below is borrowed from [Maximum Mean Discrepancy drift detector
-on CIFAR-10](../examples/cd_mmd_cifar10.nblink), where the softmax
+on CIFAR-10](../examples/cd_mmd_cifar10.ipynb), where the softmax
 layer of the well-known
 [ResNet-32](https://arxiv.org/pdf/1512.03385.pdf) model is fed into
 an `MMDDrift` detector.
@@ -393,12 +387,11 @@ models such as [BERT](https://arxiv.org/abs/1810.04805) or
 used, but Alibi Detect also allows you to easily use your own embeddings
 of choice. A subsequent dimension reduction step can also be applied if
 necessary, as is done in the [Text drift detection on IMDB movie
-reviews](../examples/cd_text_imdb.nblink) example, where the
+reviews](../examples/cd_text_imdb.ipynb) example, where the
 768-dimensional embeddings from the BERT model are passed through an
 untrained AutoEncoder to reduce their dimensionality. Alibi Detect
 allows various types of embeddings to be extracted from transformer
-models, as discussed in
-[alibi_detect.models.tensorflow.embedding](../api/alibi_detect.models.tensorflow.embedding.rst).
+models, using {class}`~alibi_detect.models.tensorflow.embedding.TransformerEmbedding`.
 
 #### Graph data
 
@@ -406,7 +399,7 @@ In a similar manner to text data, graph data requires preprocessing
 before drift detection can be performed. This can be done by extracting
 graph embeddings from graph neural network (GNN) encoders, as shown
 below, and demonstrated in the [Drift detection on molecular
-graphs](../examples/cd_mol.nblink) example.
+graphs](../examples/cd_mol.ipynb) example.
 
 ```{image} images/graph_embedding.png
 :align: center
@@ -425,7 +418,7 @@ Since the number of dimensions is already low, dimension reduction step
 is not necessary here here. For a more advanced example using the [MMD
 detector](methods/mmddrift.ipynb) with dimension reduction, check out
 the [Maximum Mean Discrepancy drift detector on
-CIFAR-10](../examples/cd_mmd_cifar10.nblink) example.
+CIFAR-10](../examples/cd_mmd_cifar10.ipynb) example.
 
 The true model/process is defined as:
 
@@ -751,7 +744,7 @@ of the classifier to shine light on exactly which features of the data
 were used to distinguish reference from test samples, and therefore
 caused drift to be detected. The [Interpretable drift detection with the
 spot-the-diff detector on MNIST and Wine-Quality
-datasets](../examples/cd_spot_the_diff_mnist_wine.nblink) example
+datasets](../examples/cd_spot_the_diff_mnist_wine.ipynb) example
 demonstrates this capability.
 
 ## 4. Online drift detection

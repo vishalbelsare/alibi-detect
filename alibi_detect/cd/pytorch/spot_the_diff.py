@@ -8,6 +8,7 @@ from alibi_detect.cd.pytorch.classifier import ClassifierDriftTorch
 from alibi_detect.utils.pytorch.data import TorchDataset
 from alibi_detect.utils.pytorch import GaussianRBF
 from alibi_detect.utils.pytorch.prediction import predict_batch
+from alibi_detect.utils._types import TorchDeviceType
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ class SpotTheDiffDriftTorch:
             self,
             x_ref: np.ndarray,
             p_val: float = .05,
+            x_ref_preprocessed: bool = False,
             preprocess_fn: Optional[Callable] = None,
             kernel: Optional[nn.Module] = None,
             n_diffs: int = 1,
@@ -34,9 +36,10 @@ class SpotTheDiffDriftTorch:
             epochs: int = 3,
             verbose: int = 0,
             train_kwargs: Optional[dict] = None,
-            device: Optional[str] = None,
+            device: TorchDeviceType = None,
             dataset: Callable = TorchDataset,
             dataloader: Callable = DataLoader,
+            input_shape: Optional[tuple] = None,
             data_type: Optional[str] = None
     ) -> None:
         """
@@ -56,6 +59,10 @@ class SpotTheDiffDriftTorch:
             Data used as reference distribution.
         p_val
             p-value used for the significance of the test.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         preprocess_fn
             Function to preprocess the data before computing the data drift metrics.
         kernel
@@ -99,12 +106,15 @@ class SpotTheDiffDriftTorch:
         train_kwargs
             Optional additional kwargs when fitting the classifier.
         device
-            Device type used. The default None tries to use the GPU and falls back on CPU if needed.
-            Can be specified by passing either 'cuda', 'gpu' or 'cpu'.
+            Device type used. The default tries to use the GPU and falls back on CPU if needed.
+            Can be specified by passing either ``'cuda'``, ``'gpu'``, ``'cpu'`` or an instance of
+            ``torch.device``.
         dataset
             Dataset object used during training.
         dataloader
             Dataloader object used during training.
+        input_shape
+            Shape of input data.
         data_type
             Optionally specify the data type (tabular, image or time-series). Added to metadata.
         """
@@ -113,9 +123,9 @@ class SpotTheDiffDriftTorch:
         if n_folds is not None and n_folds > 1:
             logger.warning("When using multiple folds the returned diffs will correspond to the final fold only.")
 
-        if preprocess_fn is not None:
+        if not x_ref_preprocessed and preprocess_fn is not None:
             x_ref_proc = preprocess_fn(x_ref)
-        elif preprocess_batch_fn is not None:
+        elif not x_ref_preprocessed and preprocess_batch_fn is not None:
             x_ref_proc = predict_batch(
                 x_ref, lambda x: x, preprocess_fn=preprocess_batch_fn,
                 device=torch.device('cpu'), batch_size=batch_size
@@ -138,7 +148,8 @@ class SpotTheDiffDriftTorch:
             x_ref=x_ref,
             model=model,
             p_val=p_val,
-            preprocess_x_ref=True,
+            x_ref_preprocessed=x_ref_preprocessed,
+            preprocess_at_init=True,
             update_x_ref=None,
             preprocess_fn=preprocess_fn,
             preds_type='logits',
@@ -158,6 +169,7 @@ class SpotTheDiffDriftTorch:
             device=device,
             dataset=dataset,
             dataloader=dataloader,
+            input_shape=input_shape,
             data_type=data_type
         )
         self.meta = self._detector.meta
@@ -204,16 +216,17 @@ class SpotTheDiffDriftTorch:
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the detector's metadata.
-        'data' contains the drift prediction, the diffs used to distinguish reference from test instances,
-        and optionally the p-value, performance of the classifier relative to its expectation under the
-        no-change null, the out-of-fold classifier model prediction probabilities on the reference and test
-        data, and the trained model.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the detector's metadata.
+            - ``'data'`` contains the drift prediction, the diffs used to distinguish reference from test instances, \
+        and optionally the p-value, performance of the classifier relative to its expectation under the \
+        no-change null, the out-of-fold classifier model prediction probabilities on the reference and test \
+        data as well as well as the associated reference and test instances of the out-of-fold predictions, \
+        and the trained model.
         """
         preds = self._detector.predict(x, return_p_val, return_distance, return_probs, return_model=True)
-        preds['data']['diffs'] = preds['data']['model'].diffs.detach().cpu().numpy()  # type: ignore
-        preds['data']['diff_coeffs'] = preds['data']['model'].coeffs.detach().cpu().numpy()  # type: ignore
+        preds['data']['diffs'] = preds['data']['model'].diffs.detach().cpu().numpy()
+        preds['data']['diff_coeffs'] = preds['data']['model'].coeffs.detach().cpu().numpy()
         if not return_model:
             del preds['data']['model']
         return preds

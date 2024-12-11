@@ -6,17 +6,20 @@ from alibi_detect.cd.ks import KSDrift
 from alibi_detect.cd.chisquare import ChiSquareDrift
 from alibi_detect.cd.preprocess import classifier_uncertainty, regressor_uncertainty
 from alibi_detect.cd.utils import encompass_batching, encompass_shuffling_and_batch_filling
-from alibi_detect.utils.frameworks import has_pytorch, has_tensorflow
+from alibi_detect.utils.frameworks import BackendValidator, Framework
+from alibi_detect.base import DriftConfigMixin
+from alibi_detect.utils._types import TorchDeviceType
 
 logger = logging.getLogger(__name__)
 
 
-class ClassifierUncertaintyDrift:
+class ClassifierUncertaintyDrift(DriftConfigMixin):
     def __init__(
             self,
             x_ref: Union[np.ndarray, list],
             model: Callable,
             p_val: float = .05,
+            x_ref_preprocessed: bool = False,
             backend: Optional[str] = None,
             update_x_ref: Optional[Dict[str, int]] = None,
             preds_type: str = 'probs',
@@ -24,9 +27,10 @@ class ClassifierUncertaintyDrift:
             margin_width: float = 0.1,
             batch_size: int = 32,
             preprocess_batch_fn: Optional[Callable] = None,
-            device: Optional[str] = None,
+            device: TorchDeviceType = None,
             tokenizer: Optional[Callable] = None,
             max_len: Optional[int] = None,
+            input_shape: Optional[tuple] = None,
             data_type: Optional[str] = None,
     ) -> None:
         """
@@ -45,6 +49,10 @@ class ClassifierUncertaintyDrift:
             Backend to use if model requires batch prediction. Options are 'tensorflow' or 'pytorch'.
         p_val
             p-value used for the significance of the test.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         update_x_ref
             Reference data can optionally be updated to the last n instances seen by the detector
             or via reservoir sampling with size n. For the former, the parameter equals {'last': n} while
@@ -62,19 +70,27 @@ class ClassifierUncertaintyDrift:
             Optional batch preprocessing function. For example to convert a list of objects to a batch which can be
             processed by the model.
         device
-            Device type used. The default None tries to use the GPU and falls back on CPU if needed.
-            Can be specified by passing either 'cuda', 'gpu' or 'cpu'. Only relevant for 'pytorch' backend.
+            Device type used. The default tries to use the GPU and falls back on CPU if needed.
+            Can be specified by passing either ``'cuda'``, ``'gpu'``, ``'cpu'`` or an instance of
+            ``torch.device``. Only relevant for 'pytorch' backend.
         tokenizer
             Optional tokenizer for NLP models.
         max_len
             Optional max token length for NLP models.
+        input_shape
+            Shape of input data.
         data_type
             Optionally specify the data type (tabular, image or time-series). Added to metadata.
         """
+        # Set config
+        self._set_config(locals())
 
-        if backend == 'tensorflow' and not has_tensorflow or backend == 'pytorch' and not has_pytorch:
-            raise ImportError(f'{backend} not installed. Cannot initialize and run the '
-                              f'ClassifierUncertaintyDrift detector with {backend} backend.')
+        if backend:
+            backend = backend.lower()
+        BackendValidator(backend_options={Framework.TENSORFLOW: [Framework.TENSORFLOW],
+                                          Framework.PYTORCH: [Framework.PYTORCH],
+                                          None: []},
+                         construct_name=self.__class__.__name__).verify_backend(backend)
 
         if backend is None:
             if device not in [None, 'cpu']:
@@ -105,18 +121,22 @@ class ClassifierUncertaintyDrift:
             self._detector = KSDrift(
                 x_ref=x_ref,
                 p_val=p_val,
-                preprocess_x_ref=True,
+                x_ref_preprocessed=x_ref_preprocessed,
+                preprocess_at_init=True,
                 update_x_ref=update_x_ref,
                 preprocess_fn=preprocess_fn,
+                input_shape=input_shape,
                 data_type=data_type
             )
         elif uncertainty_type == 'margin':
             self._detector = ChiSquareDrift(
                 x_ref=x_ref,
                 p_val=p_val,
-                preprocess_x_ref=True,
+                x_ref_preprocessed=x_ref_preprocessed,
+                preprocess_at_init=True,
                 update_x_ref=update_x_ref,
                 preprocess_fn=preprocess_fn,
+                input_shape=input_shape,
                 data_type=data_type
             )
         else:
@@ -125,8 +145,8 @@ class ClassifierUncertaintyDrift:
         self.meta = self._detector.meta
         self.meta['name'] = 'ClassifierUncertaintyDrift'
 
-    def predict(self, x: Union[np.ndarray, list],  return_p_val: bool = True,
-                return_distance: bool = True) -> Dict[Dict[str, str], Dict[str, Union[int, float]]]:
+    def predict(self, x: Union[np.ndarray, list], return_p_val: bool = True,
+                return_distance: bool = True) -> Dict[Dict[str, str], Dict[str, Union[np.ndarray, int, float]]]:
         """
         Predict whether a batch of data has drifted from the reference data.
 
@@ -141,28 +161,30 @@ class ClassifierUncertaintyDrift:
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the model's metadata.
-        'data' contains the drift prediction and optionally the p-value, threshold and test statistic.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the model's metadata.
+            - ``'data'`` contains the drift prediction and optionally the p-value, threshold and test statistic.
         """
         return self._detector.predict(x, return_p_val=return_p_val, return_distance=return_distance)
 
 
-class RegressorUncertaintyDrift:
+class RegressorUncertaintyDrift(DriftConfigMixin):
     def __init__(
             self,
             x_ref: Union[np.ndarray, list],
             model: Callable,
             p_val: float = .05,
+            x_ref_preprocessed: bool = False,
             backend: Optional[str] = None,
             update_x_ref: Optional[Dict[str, int]] = None,
             uncertainty_type: str = 'mc_dropout',
             n_evals: int = 25,
             batch_size: int = 32,
             preprocess_batch_fn: Optional[Callable] = None,
-            device: Optional[str] = None,
+            device: TorchDeviceType = None,
             tokenizer: Optional[Callable] = None,
             max_len: Optional[int] = None,
+            input_shape: Optional[tuple] = None,
             data_type: Optional[str] = None,
     ) -> None:
         """
@@ -181,6 +203,10 @@ class RegressorUncertaintyDrift:
             Backend to use if model requires batch prediction. Options are 'tensorflow' or 'pytorch'.
         p_val
             p-value used for the significance of the test.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         update_x_ref
             Reference data can optionally be updated to the last n instances seen by the detector
             or via reservoir sampling with size n. For the former, the parameter equals {'last': n} while
@@ -198,28 +224,36 @@ class RegressorUncertaintyDrift:
             Optional batch preprocessing function. For example to convert a list of objects to a batch which can be
             processed by the model.
         device
-            Device type used. The default None tries to use the GPU and falls back on CPU if needed.
-            Can be specified by passing either 'cuda', 'gpu' or 'cpu'. Only relevant for 'pytorch' backend.
+            Device type used. The default tries to use the GPU and falls back on CPU if needed.
+            Can be specified by passing either ``'cuda'``, ``'gpu'``, ``'cpu'`` or an instance of
+            ``torch.device``. Only relevant for 'pytorch' backend.
         tokenizer
             Optional tokenizer for NLP models.
         max_len
             Optional max token length for NLP models.
+        input_shape
+            Shape of input data.
         data_type
             Optionally specify the data type (tabular, image or time-series). Added to metadata.
         """
+        # Set config
+        self._set_config(locals())
 
-        if backend == 'tensorflow' and not has_tensorflow or backend == 'pytorch' and not has_pytorch:
-            raise ImportError(f'{backend} not installed. Cannot initialize and run the '
-                              f'RegressorUncertaintyDrift detector with {backend} backend.')
+        if backend:
+            backend = backend.lower()
+        BackendValidator(backend_options={Framework.TENSORFLOW: [Framework.TENSORFLOW],
+                                          Framework.PYTORCH: [Framework.PYTORCH],
+                                          None: []},
+                         construct_name=self.__class__.__name__).verify_backend(backend)
 
         if backend is None:
             model_fn = model
         else:
             if uncertainty_type == 'mc_dropout':
-                if backend == 'pytorch':
+                if backend == Framework.PYTORCH:
                     from alibi_detect.cd.pytorch.utils import activate_train_mode_for_dropout_layers
                     model = activate_train_mode_for_dropout_layers(model)
-                elif backend == 'tensorflow':
+                elif backend == Framework.TENSORFLOW:
                     logger.warning(
                         "MC dropout being applied to tensorflow model. May not be suitable if model contains"
                         "non-dropout layers with different train and inference time behaviour"
@@ -237,7 +271,7 @@ class RegressorUncertaintyDrift:
                 max_len=max_len
             )
 
-            if uncertainty_type == 'mc_dropout' and backend == 'tensorflow':
+            if uncertainty_type == 'mc_dropout' and backend == Framework.TENSORFLOW:
                 # To average over possible batchnorm effects as all layers evaluated in training mode.
                 model_fn = encompass_shuffling_and_batch_filling(model_fn, batch_size=batch_size)
 
@@ -251,17 +285,19 @@ class RegressorUncertaintyDrift:
         self._detector = KSDrift(
             x_ref=x_ref,
             p_val=p_val,
-            preprocess_x_ref=True,
+            x_ref_preprocessed=x_ref_preprocessed,
+            preprocess_at_init=True,
             update_x_ref=update_x_ref,
             preprocess_fn=preprocess_fn,
+            input_shape=input_shape,
             data_type=data_type
         )
 
         self.meta = self._detector.meta
         self.meta['name'] = 'RegressorUncertaintyDrift'
 
-    def predict(self, x: Union[np.ndarray, list],  return_p_val: bool = True,
-                return_distance: bool = True) -> Dict[Dict[str, str], Dict[str, Union[int, float]]]:
+    def predict(self, x: Union[np.ndarray, list], return_p_val: bool = True,
+                return_distance: bool = True) -> Dict[Dict[str, str], Dict[str, Union[np.ndarray, int, float]]]:
         """
         Predict whether a batch of data has drifted from the reference data.
 
@@ -276,8 +312,8 @@ class RegressorUncertaintyDrift:
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the model's metadata.
-        'data' contains the drift prediction and optionally the p-value, threshold and test statistic.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the model's metadata.
+            - ``'data'`` contains the drift prediction and optionally the p-value, threshold and test statistic.
         """
         return self._detector.predict(x, return_p_val=return_p_val, return_distance=return_distance)

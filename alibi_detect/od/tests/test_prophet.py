@@ -1,5 +1,4 @@
 import datetime
-import fbprophet
 from itertools import product
 import numpy as np
 import pandas as pd
@@ -12,7 +11,7 @@ return_instance_score = [True, False]
 return_forecast = [True, False]
 
 d_fit = {
-    'ds': pd.date_range(pd.datetime.today(), periods=100),
+    'ds': pd.date_range(datetime.date.today(), periods=100),
     'y': np.random.randn(100)
 }
 df_fit = pd.DataFrame(data=d_fit)
@@ -34,11 +33,12 @@ def prophet_params(request):
 
 @pytest.mark.parametrize('prophet_params', list(range(n_tests)), indirect=True)
 def test_prophet(prophet_params):
+    prophet = pytest.importorskip('prophet', reason="Prophet tests skipped as Prophet not installed")
     growth, return_instance_score, return_forecast = prophet_params
     od = OutlierProphet(growth=growth)
-    assert isinstance(od.model, fbprophet.forecaster.Prophet)
-    assert od.meta == {'name': 'OutlierProphet', 'detector_type': 'offline', 'data_type': 'time-series',
-                       'version': __version__}
+    assert isinstance(od.model, prophet.forecaster.Prophet)
+    assert od.meta == {'name': 'OutlierProphet', 'detector_type': 'outlier', 'data_type': 'time-series',
+                       'online': False, 'version': __version__}
     if growth == 'logistic':
         df_fit['cap'] = 10.
         df_test['cap'] = 10.

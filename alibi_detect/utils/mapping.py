@@ -51,7 +51,7 @@ def ord2num(data: np.ndarray, dist: dict) -> np.ndarray:
     for k, v in dist.items():
         cat_col = X[:, k].copy()
         cat_col = np.array([v[int(cat_col[i])] for i in range(rng)])
-        if type(X) == np.matrix:
+        if isinstance(X, np.matrix):
             X[:, k] = cat_col.reshape(-1, 1)
         else:
             X[:, k] = cat_col
@@ -138,7 +138,7 @@ def ohe2ord(X_ohe: np.ndarray, cat_vars_ohe: dict) -> Tuple[np.ndarray, dict]:
     """
     n, cols = X_ohe.shape
     ohe_vars_keys = list(cat_vars_ohe.keys())
-    X_list = []  # type: List
+    X_list: List = []
     c = 0
     cat_vars_ord = {}
     while c < cols:

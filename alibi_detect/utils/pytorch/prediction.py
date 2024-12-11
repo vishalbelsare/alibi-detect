@@ -1,14 +1,17 @@
 from functools import partial
+from typing import Callable, Type, Union
+
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Callable, Union
+from alibi_detect.utils.pytorch.misc import get_device
 from alibi_detect.utils.prediction import tokenize_transformer
+from alibi_detect.utils._types import TorchDeviceType
 
 
 def predict_batch(x: Union[list, np.ndarray, torch.Tensor], model: Union[Callable, nn.Module, nn.Sequential],
-                  device: torch.device = None, batch_size: int = int(1e10), preprocess_fn: Callable = None,
-                  dtype: Union[np.dtype, torch.dtype] = np.float32) -> Union[np.ndarray, torch.Tensor, tuple]:
+                  device: TorchDeviceType = None, batch_size: int = int(1e10), preprocess_fn: Callable = None,
+                  dtype: Union[Type[np.generic], torch.dtype] = np.float32) -> Union[np.ndarray, torch.Tensor, tuple]:
     """
     Make batch predictions on a model.
 
@@ -19,8 +22,9 @@ def predict_batch(x: Union[list, np.ndarray, torch.Tensor], model: Union[Callabl
     model
         PyTorch model.
     device
-        Device type used. The default None tries to use the GPU and falls back on CPU if needed.
-        Can be specified by passing either torch.device('cuda') or torch.device('cpu').
+        Device type used. The default tries to use the GPU and falls back on CPU if needed.
+        Can be specified by passing either ``'cuda'``, ``'gpu'``, ``'cpu'`` or an instance of
+        ``torch.device``.
     batch_size
         Batch size used during prediction.
     preprocess_fn
@@ -32,15 +36,14 @@ def predict_batch(x: Union[list, np.ndarray, torch.Tensor], model: Union[Callabl
     -------
     Numpy array, torch tensor or tuples of those with model outputs.
     """
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device(device)
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
     n = len(x)
     n_minibatch = int(np.ceil(n / batch_size))
     return_np = not isinstance(dtype, torch.dtype)
     return_list = False
-    preds = []  # type: Union[list, tuple]
+    preds: Union[list, tuple] = []
     with torch.no_grad():
         for i in range(n_minibatch):
             istart, istop = i * batch_size, min((i + 1) * batch_size, n)
@@ -64,17 +67,18 @@ def predict_batch(x: Union[list, np.ndarray, torch.Tensor], model: Union[Callabl
             else:
                 raise TypeError(f'Model output type {type(preds_tmp)} not supported. The model output '
                                 f'type needs to be one of list, tuple, np.ndarray or torch.Tensor.')
-    concat = partial(np.concatenate, axis=0) if return_np else partial(torch.cat, dim=0)
-    out = tuple(concat(p) for p in preds) if isinstance(preds, tuple) else concat(preds)
+    concat = partial(np.concatenate, axis=0) if return_np else partial(torch.cat, dim=0)  # type: ignore[arg-type]
+    out: Union[tuple, np.ndarray, torch.Tensor] = tuple(concat(p) for p in preds) if isinstance(preds, tuple) \
+        else concat(preds)
     if return_list:
-        out = list(out)
-    return out
+        out = list(out)  # type: ignore[assignment]
+    return out  # TODO: update return type with list
 
 
 def predict_batch_transformer(x: Union[list, np.ndarray], model: Union[nn.Module, nn.Sequential],
-                              tokenizer: Callable, max_len: int, device: torch.device = None,
-                              batch_size: int = int(1e10), dtype: Union[np.float32, torch.dtype] = np.float32) \
-        -> Union[np.ndarray, torch.Tensor]:
+                              tokenizer: Callable, max_len: int, device: TorchDeviceType = None,
+                              batch_size: int = int(1e10), dtype: Union[Type[np.generic], torch.dtype] = np.float32) \
+        -> Union[np.ndarray, torch.Tensor, tuple]:
     """
     Make batch predictions using a transformers tokenizer and model.
 
@@ -89,8 +93,9 @@ def predict_batch_transformer(x: Union[list, np.ndarray], model: Union[nn.Module
     max_len
         Max sequence length for tokens.
     device
-        Device type used. The default None tries to use the GPU and falls back on CPU if needed.
-        Can be specified by passing either torch.device('cuda') or torch.device('cpu').
+        Device type used. The default tries to use the GPU and falls back on CPU if needed.
+        Can be specified by passing either ``'cuda'``, ``'gpu'``, ``'cpu'`` or an instance of
+        ``torch.device``.
     batch_size
         Batch size used during prediction.
     dtype

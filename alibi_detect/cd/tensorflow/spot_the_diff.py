@@ -15,6 +15,7 @@ class SpotTheDiffDriftTF:
             self,
             x_ref: np.ndarray,
             p_val: float = .05,
+            x_ref_preprocessed: bool = False,
             preprocess_fn: Optional[Callable] = None,
             kernel: Optional[tf.keras.Model] = None,
             n_diffs: int = 1,
@@ -33,6 +34,7 @@ class SpotTheDiffDriftTF:
             verbose: int = 0,
             train_kwargs: Optional[dict] = None,
             dataset: Callable = TFDataset,
+            input_shape: Optional[tuple] = None,
             data_type: Optional[str] = None
     ) -> None:
         """
@@ -52,6 +54,10 @@ class SpotTheDiffDriftTF:
             Data used as reference distribution.
         p_val
             p-value used for the significance of the test.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         preprocess_fn
             Function to preprocess the data before computing the data drift metrics.
         kernel
@@ -96,6 +102,8 @@ class SpotTheDiffDriftTF:
             Optional additional kwargs when fitting the classifier.
         dataset
             Dataset object used during training.
+        input_shape
+            Shape of input data.
         data_type
             Optionally specify the data type (tabular, image or time-series). Added to metadata.
         """
@@ -104,9 +112,9 @@ class SpotTheDiffDriftTF:
         if n_folds is not None and n_folds > 1:
             logger.warning("When using multiple folds the returned diffs will correspond to the final fold only.")
 
-        if preprocess_fn is not None:
+        if not x_ref_preprocessed and preprocess_fn is not None:
             x_ref_proc = preprocess_fn(x_ref)
-        elif preprocess_batch_fn is not None:
+        elif not x_ref_preprocessed and preprocess_batch_fn is not None:
             x_ref_proc = predict_batch(
                 x_ref, lambda x: x, preprocess_fn=preprocess_batch_fn, batch_size=batch_size
             )
@@ -128,7 +136,8 @@ class SpotTheDiffDriftTF:
             x_ref=x_ref,
             model=model,
             p_val=p_val,
-            preprocess_x_ref=True,
+            x_ref_preprocessed=x_ref_preprocessed,
+            preprocess_at_init=True,
             update_x_ref=None,
             preprocess_fn=preprocess_fn,
             preds_type='logits',
@@ -146,6 +155,7 @@ class SpotTheDiffDriftTF:
             verbose=verbose,
             train_kwargs=train_kwargs,
             dataset=dataset,
+            input_shape=input_shape,
             data_type=data_type
         )
         self.meta = self._detector.meta
@@ -160,9 +170,23 @@ class SpotTheDiffDriftTF:
             self.config = {'kernel': kernel, 'x_ref': x_ref, 'initial_diffs': initial_diffs}
             self.kernel = kernel
             self.mean = tf.convert_to_tensor(x_ref.mean(0))
-            self.diffs = tf.Variable(initial_diffs, dtype=np.float32)
-            self.bias = tf.Variable(tf.zeros((1,)))
-            self.coeffs = tf.Variable(tf.zeros((len(initial_diffs),)))
+
+            self.diffs = self.add_weight(
+                shape=initial_diffs.shape,
+                initializer=tf.keras.initializers.Constant(initial_diffs),
+                dtype=tf.float32,
+                trainable=True
+            )
+            self.bias = self.add_weight(
+                shape=(1,),
+                initializer="zeros",
+                trainable=True,
+            )
+            self.coeffs = self.add_weight(
+                shape=(len(initial_diffs),),
+                initializer="zeros",
+                trainable=True,
+            )
 
         def call(self, x: tf.Tensor) -> tf.Tensor:
             k_xtl = self.kernel(x, self.mean + self.diffs)
@@ -200,16 +224,17 @@ class SpotTheDiffDriftTF:
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the detector's metadata.
-        'data' contains the drift prediction, the diffs used to distinguish reference from test instances,
-        and optionally the p-value, performance of the classifier relative to its expectation under the
-        no-change null, the out-of-fold classifier model prediction probabilities on the reference and test
-        data, and the trained model.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the detector's metadata.
+            - ``'data'`` contains the drift prediction, the diffs used to distinguish reference from test instances, \
+        and optionally the p-value, performance of the classifier relative to its expectation under the \
+        no-change null, the out-of-fold classifier model prediction probabilities on the reference and test \
+        data as well as well as the associated reference and test instances of the out-of-fold predictions, \
+        and the trained model.
         """
         preds = self._detector.predict(x, return_p_val, return_distance, return_probs, return_model=True)
-        preds['data']['diffs'] = preds['data']['model'].diffs.numpy()  # type: ignore
-        preds['data']['diff_coeffs'] = preds['data']['model'].coeffs.numpy()  # type: ignore
+        preds['data']['diffs'] = preds['data']['model'].diffs.numpy()
+        preds['data']['diff_coeffs'] = preds['data']['model'].coeffs.numpy()
         if not return_model:
             del preds['data']['model']
         return preds

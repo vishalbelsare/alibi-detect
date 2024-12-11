@@ -1,7 +1,7 @@
 import logging
 import numpy as np
 from scipy.linalg import eigh
-from typing import Dict, Union
+from typing import Dict, Optional
 from alibi_detect.utils.discretizer import Discretizer
 from alibi_detect.utils.distance import abdm, mvdm, multidim_scaling
 from alibi_detect.utils.mapping import ohe2ord, ord2num
@@ -63,17 +63,18 @@ class Mahalanobis(BaseDetector, FitMixin, ThresholdMixin):
         # keys = categorical columns; values = numerical value for each of the categories
         self.cat_vars = cat_vars
         self.ohe = ohe
-        self.d_abs = {}  # type: Dict
+        self.d_abs: Dict = {}
 
         # initial parameter values
-        self.clip = None  # type: Union[None, list]
+        self.clip: Optional[list] = None
         self.mean = 0
         self.C = 0
         self.n = 0
 
         # set metadata
-        self.meta['detector_type'] = 'online'
+        self.meta['detector_type'] = 'outlier'
         self.meta['data_type'] = data_type
+        self.meta['online'] = True
 
     def fit(self,
             X: np.ndarray,
@@ -268,13 +269,13 @@ class Mahalanobis(BaseDetector, FitMixin, ThresholdMixin):
         cov_batch = (n - 1.) / (n + max(1, n_batch - 1.)) * self.C + 1. / (n + max(1, n_batch - 1.)) * B.sum(axis=0)
 
         # PCA
-        eigvals, eigvects = eigh(cov_batch, eigvals=(n_params - n_components, n_params - 1))
+        _, eigvects = eigh(cov_batch, subset_by_index=(n_params - n_components, n_params - 1))
 
         # projections
         proj_x = np.matmul(X, eigvects)
         proj_x_clip = np.matmul(X_clip, eigvects)
         proj_means = np.matmul(new_means_offset, eigvects)
-        if type(self.C) == int and self.C == 0:
+        if isinstance(self.C, int) and self.C == 0:
             proj_cov = np.diag(np.zeros(n_components))
         else:
             proj_cov = np.matmul(eigvects.transpose(), np.matmul(self.C, eigvects))
@@ -329,9 +330,9 @@ class Mahalanobis(BaseDetector, FitMixin, ThresholdMixin):
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the model's metadata.
-        'data' contains the outlier predictions and instance level outlier scores.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the model's metadata.
+            - ``'data'`` contains the outlier predictions and instance level outlier scores.
         """
         # convert categorical variables to numerical values
         X = self.cat2num(X)

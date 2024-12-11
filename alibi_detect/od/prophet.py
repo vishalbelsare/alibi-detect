@@ -1,10 +1,4 @@
-try:
-    from fbprophet import Prophet
-
-    PROPHET_INSTALLED = True
-except ImportError:
-    PROPHET_INSTALLED = False
-
+from prophet import Prophet
 import logging
 import pandas as pd
 from typing import Dict, List, Union
@@ -117,8 +111,9 @@ class OutlierProphet(BaseDetector, FitMixin):
         self.cap = cap
 
         # set metadata
-        self.meta['detector_type'] = 'offline'
+        self.meta['detector_type'] = 'outlier'
         self.meta['data_type'] = 'time-series'
+        self.meta['online'] = False
 
     def fit(self, df: pd.DataFrame) -> None:
         """
@@ -177,9 +172,9 @@ class OutlierProphet(BaseDetector, FitMixin):
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the model's metadata.
-        'data' contains the outlier predictions, instance level outlier scores and the model forecast.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the model's metadata.
+            - ``'data'`` contains the outlier predictions, instance level outlier scores and the model forecast.
         """
         # compute outlier scores
         forecast = self.score(df)

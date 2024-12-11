@@ -1,6 +1,8 @@
 import numpy as np
 from typing import Callable, Dict, Optional, Union
-from alibi_detect.utils.frameworks import has_pytorch, has_tensorflow
+from alibi_detect.utils.frameworks import has_pytorch, has_tensorflow, BackendValidator, Framework
+from alibi_detect.base import DriftConfigMixin
+from alibi_detect.utils._types import TorchDeviceType
 
 if has_pytorch:
     from alibi_detect.cd.pytorch.spot_the_diff import SpotTheDiffDriftTorch
@@ -12,12 +14,13 @@ if has_tensorflow:
     from alibi_detect.utils.tensorflow.data import TFDataset
 
 
-class SpotTheDiffDrift:
+class SpotTheDiffDrift(DriftConfigMixin):
     def __init__(
             self,
             x_ref: Union[np.ndarray, list],
             backend: str = 'tensorflow',
             p_val: float = .05,
+            x_ref_preprocessed: bool = False,
             preprocess_fn: Optional[Callable] = None,
             kernel: Callable = None,
             n_diffs: int = 1,
@@ -35,9 +38,10 @@ class SpotTheDiffDrift:
             epochs: int = 3,
             verbose: int = 0,
             train_kwargs: Optional[dict] = None,
-            device: Optional[str] = None,
+            device: TorchDeviceType = None,
             dataset: Optional[Callable] = None,
             dataloader: Optional[Callable] = None,
+            input_shape: Optional[tuple] = None,
             data_type: Optional[str] = None
     ) -> None:
         """
@@ -59,6 +63,10 @@ class SpotTheDiffDrift:
             Backend used for the training loop implementation.
         p_val
             p-value used for the significance of the test.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         preprocess_fn
             Function to preprocess the data before computing the data drift metrics.
         kernel
@@ -102,24 +110,29 @@ class SpotTheDiffDrift:
         train_kwargs
             Optional additional kwargs when fitting the classifier.
         device
-            Device type used. The default None tries to use the GPU and falls back on CPU if needed.
-            Can be specified by passing either 'cuda', 'gpu' or 'cpu'. Only relevant for 'pytorch' backend.
+            Device type used. The default tries to use the GPU and falls back on CPU if needed.
+            Can be specified by passing either ``'cuda'``, ``'gpu'``, ``'cpu'`` or an instance of
+            ``torch.device``. Only relevant for 'pytorch' backend.
         dataset
             Dataset object used during training.
         dataloader
             Dataloader object used during training. Only relevant for 'pytorch' backend.
+        input_shape
+            Shape of input data.
         data_type
             Optionally specify the data type (tabular, image or time-series). Added to metadata.
         """
         super().__init__()
 
-        backend = backend.lower()
-        if backend == 'tensorflow' and not has_tensorflow or backend == 'pytorch' and not has_pytorch:
-            raise ImportError(f'{backend} not installed. Cannot initialize and run the '
-                              f'SpotTheDiffDrift detector with {backend} backend.')
-        elif backend not in ['tensorflow', 'pytorch']:
-            raise NotImplementedError(f'{backend} not implemented. Use tensorflow or pytorch instead.')
+        # Set config
+        self._set_config(locals())
 
+        backend = backend.lower()
+        BackendValidator(
+            backend_options={Framework.TENSORFLOW: [Framework.TENSORFLOW],
+                             Framework.PYTORCH: [Framework.PYTORCH]},
+            construct_name=self.__class__.__name__
+        ).verify_backend(backend)
         kwargs = locals()
         args = [kwargs['x_ref']]
         pop_kwargs = ['self', 'x_ref',  'backend', '__class__']
@@ -127,12 +140,12 @@ class SpotTheDiffDrift:
             pop_kwargs += ['optimizer']
         [kwargs.pop(k, None) for k in pop_kwargs]
 
-        if backend == 'tensorflow' and has_tensorflow:
+        if backend == Framework.TENSORFLOW:
             pop_kwargs = ['device', 'dataloader']
             [kwargs.pop(k, None) for k in pop_kwargs]
             if dataset is None:
                 kwargs.update({'dataset': TFDataset})
-            self._detector = SpotTheDiffDriftTF(*args, **kwargs)  # type: ignore
+            self._detector = SpotTheDiffDriftTF(*args, **kwargs)
         else:
             if dataset is None:
                 kwargs.update({'dataset': TorchDataset})
@@ -165,11 +178,12 @@ class SpotTheDiffDrift:
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the detector's metadata.
-        'data' contains the drift prediction, the diffs used to distinguish reference from test instances,
-        and optionally the p-value, performance of the classifier relative to its expectation under the
-        no-change null, the out-of-fold classifier model prediction probabilities on the reference and test
-        data, and the trained model.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the detector's metadata.
+            - ``'data'`` contains the drift prediction, the diffs used to distinguish reference from test instances, \
+            and optionally the p-value, performance of the classifier relative to its expectation under the \
+            no-change null, the out-of-fold classifier model prediction probabilities on the reference and test \
+            data as well as well as the associated reference and test instances of the out-of-fold predictions, \
+            and the trained model.
         """
         return self._detector.predict(x, return_p_val, return_distance, return_probs, return_model)

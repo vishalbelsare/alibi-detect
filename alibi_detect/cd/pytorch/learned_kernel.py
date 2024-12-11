@@ -1,26 +1,29 @@
 from copy import deepcopy
 from functools import partial
 from tqdm import tqdm
-import logging
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from typing import Callable, Dict, Optional, Union, Tuple
 from alibi_detect.cd.base import BaseLearnedKernelDrift
+from alibi_detect.utils.pytorch import get_device
 from alibi_detect.utils.pytorch.distance import mmd2_from_kernel_matrix, batch_compute_kernel_matrix
 from alibi_detect.utils.pytorch.data import TorchDataset
-
-logger = logging.getLogger(__name__)
+from alibi_detect.utils.warnings import deprecated_alias
+from alibi_detect.utils.frameworks import Framework
+from alibi_detect.utils._types import TorchDeviceType
 
 
 class LearnedKernelDriftTorch(BaseLearnedKernelDrift):
+    @deprecated_alias(preprocess_x_ref='preprocess_at_init')
     def __init__(
             self,
             x_ref: Union[np.ndarray, list],
             kernel: Union[nn.Module, nn.Sequential],
             p_val: float = .05,
-            preprocess_x_ref: bool = True,
+            x_ref_preprocessed: bool = False,
+            preprocess_at_init: bool = True,
             update_x_ref: Optional[Dict[str, int]] = None,
             preprocess_fn: Optional[Callable] = None,
             n_permutations: int = 100,
@@ -31,13 +34,16 @@ class LearnedKernelDriftTorch(BaseLearnedKernelDrift):
             optimizer: torch.optim.Optimizer = torch.optim.Adam,  # type: ignore
             learning_rate: float = 1e-3,
             batch_size: int = 32,
+            batch_size_predict: int = 32,
             preprocess_batch_fn: Optional[Callable] = None,
             epochs: int = 3,
+            num_workers: int = 0,
             verbose: int = 0,
             train_kwargs: Optional[dict] = None,
-            device: Optional[str] = None,
+            device: TorchDeviceType = None,
             dataset: Callable = TorchDataset,
             dataloader: Callable = DataLoader,
+            input_shape: Optional[tuple] = None,
             data_type: Optional[str] = None
     ) -> None:
         """
@@ -57,8 +63,13 @@ class LearnedKernelDriftTorch(BaseLearnedKernelDrift):
             Trainable PyTorch module that returns a similarity between two instances.
         p_val
             p-value used for the significance of the test.
-        preprocess_x_ref
-            Whether to already preprocess and store the reference data.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
+        preprocess_at_init
+            Whether to preprocess the reference data when the detector is instantiated. Otherwise, the reference
+            data will be preprocessed at prediction time. Only applies if `x_ref_preprocessed=False`.
         update_x_ref
             Reference data can optionally be updated to the last n instances seen by the detector
             or via reservoir sampling with size n. For the former, the parameter equals {'last': n} while
@@ -83,53 +94,61 @@ class LearnedKernelDriftTorch(BaseLearnedKernelDrift):
             Learning rate used by optimizer.
         batch_size
             Batch size used during training of the kernel.
+        batch_size_predict
+            Batch size used for the trained drift detector predictions.
         preprocess_batch_fn
             Optional batch preprocessing function. For example to convert a list of objects to a batch which can be
             processed by the kernel.
         epochs
             Number of training epochs for the kernel. Corresponds to the smaller of the reference and test sets.
+        num_workers
+            Number of workers for the dataloader. The default (`num_workers=0`) means multi-process data loading
+            is disabled. Setting `num_workers>0` may be unreliable on Windows.
         verbose
             Verbosity level during the training of the kernel. 0 is silent, 1 a progress bar.
         train_kwargs
             Optional additional kwargs when training the kernel.
         device
-            Device type used. The default None tries to use the GPU and falls back on CPU if needed.
-            Can be specified by passing either 'cuda', 'gpu' or 'cpu'. Only relevant for 'pytorch' backend.
+            Device type used. The default tries to use the GPU and falls back on CPU if needed.
+            Can be specified by passing either ``'cuda'``, ``'gpu'``, ``'cpu'`` or an instance of
+            ``torch.device``. Only relevant for 'pytorch' backend.
         dataset
             Dataset object used during training.
         dataloader
             Dataloader object used during training. Only relevant for 'pytorch' backend.
+        input_shape
+            Shape of input data.
         data_type
             Optionally specify the data type (tabular, image or time-series). Added to metadata.
         """
         super().__init__(
             x_ref=x_ref,
             p_val=p_val,
-            preprocess_x_ref=preprocess_x_ref,
+            x_ref_preprocessed=x_ref_preprocessed,
+            preprocess_at_init=preprocess_at_init,
             update_x_ref=update_x_ref,
             preprocess_fn=preprocess_fn,
             n_permutations=n_permutations,
             train_size=train_size,
             retrain_from_scratch=retrain_from_scratch,
+            input_shape=input_shape,
             data_type=data_type
         )
-        self.meta.update({'backend': 'pytorch'})
+        self.meta.update({'backend': Framework.PYTORCH.value})
 
         # set device, define model and training kwargs
-        if device is None or device.lower() in ['gpu', 'cuda']:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            if self.device.type == 'cpu':
-                logger.warning('No GPU detected, fall back on CPU.')
-        else:
-            self.device = torch.device('cpu')
+        self.device = get_device(device)
         self.original_kernel = kernel
         self.kernel = deepcopy(kernel)
 
         # define kwargs for dataloader and trainer
         self.dataset = dataset
-        self.dataloader = partial(dataloader, batch_size=batch_size, shuffle=True, drop_last=True)
+        self.dataloader = partial(dataloader, batch_size=batch_size, shuffle=True,
+                                  drop_last=True, num_workers=num_workers)
+
         self.kernel_mat_fn = partial(
-            batch_compute_kernel_matrix, device=self.device, preprocess_fn=preprocess_batch_fn, batch_size=batch_size
+            batch_compute_kernel_matrix, device=self.device, preprocess_fn=preprocess_batch_fn,
+            batch_size=batch_size_predict
         )
         self.train_kwargs = {'optimizer': optimizer, 'epochs': epochs,  'preprocess_fn': preprocess_batch_fn,
                              'reg_loss_fn': reg_loss_fn, 'learning_rate': learning_rate, 'verbose': verbose}
@@ -160,7 +179,7 @@ class LearnedKernelDriftTorch(BaseLearnedKernelDrift):
 
             return mmd2_est/reg_var_est.sqrt()
 
-    def score(self, x: Union[np.ndarray, list]) -> Tuple[float, float, np.ndarray]:
+    def score(self, x: Union[np.ndarray, list]) -> Tuple[float, float, float]:
         """
         Compute the p-value resulting from a permutation test using the maximum mean discrepancy
         as a distance measure between the reference data and the data to be tested. The kernel
@@ -173,8 +192,8 @@ class LearnedKernelDriftTorch(BaseLearnedKernelDrift):
 
         Returns
         -------
-        p-value obtained from the permutation test, the MMD^2 between the reference and test set
-        and the MMD^2 values from the permutation test.
+        p-value obtained from the permutation test, the MMD^2 between the reference and test set, \
+        and the MMD^2 threshold above which drift is flagged.
         """
         x_ref, x_cur = self.preprocess(x)
         (x_ref_tr, x_cur_tr), (x_ref_te, x_cur_te) = self.get_splits(x_ref, x_cur)
@@ -183,7 +202,7 @@ class LearnedKernelDriftTorch(BaseLearnedKernelDrift):
         self.kernel = deepcopy(self.original_kernel) if self.retrain_from_scratch else self.kernel
         self.kernel = self.kernel.to(self.device)
         train_args = [self.j_hat, (dl_ref_tr, dl_cur_tr), self.device]
-        LearnedKernelDriftTorch.trainer(*train_args, **self.train_kwargs)  # type: ignore
+        LearnedKernelDriftTorch.trainer(*train_args, **self.train_kwargs)
 
         if isinstance(x_ref_te, np.ndarray) and isinstance(x_cur_te, np.ndarray):
             x_all = np.concatenate([x_ref_te, x_cur_te], axis=0)
@@ -198,9 +217,11 @@ class LearnedKernelDriftTorch(BaseLearnedKernelDrift):
         )
         if self.device.type == 'cuda':
             mmd2, mmd2_permuted = mmd2.cpu(), mmd2_permuted.cpu()
-
         p_val = (mmd2 <= mmd2_permuted).float().mean()
-        return p_val.numpy().item(), mmd2.numpy().item(), mmd2_permuted.numpy()
+
+        idx_threshold = int(self.p_val * len(mmd2_permuted))
+        distance_threshold = torch.sort(mmd2_permuted, descending=True).values[idx_threshold]
+        return p_val.numpy().item(), mmd2.numpy().item(), distance_threshold.numpy().item()
 
     @staticmethod
     def trainer(
@@ -235,5 +256,5 @@ class LearnedKernelDriftTorch(BaseLearnedKernelDrift):
                 optimizer.step()  # type: ignore
                 if verbose == 1:
                     loss_ma = loss_ma + (loss.item() - loss_ma) / (step + 1)
-                    dl.set_description(f'Epoch {epoch + 1}/{epochs}')
-                    dl.set_postfix(dict(loss=loss_ma))
+                    dl.set_description(f'Epoch {epoch + 1}/{epochs}')  # type: ignore[union-attr]
+                    dl.set_postfix(dict(loss=loss_ma))  # type: ignore[union-attr]

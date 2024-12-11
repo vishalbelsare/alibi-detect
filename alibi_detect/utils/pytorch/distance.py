@@ -64,7 +64,7 @@ def batch_compute_kernel_matrix(
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if type(x) != type(y):
+    if type(x) != type(y):  # noqa: E721
         raise ValueError("x and y should be of the same type")
 
     if isinstance(x, np.ndarray):
@@ -73,21 +73,21 @@ def batch_compute_kernel_matrix(
     n_x, n_y = len(x), len(y)
     n_batch_x, n_batch_y = int(np.ceil(n_x / batch_size)), int(np.ceil(n_y / batch_size))
     with torch.no_grad():
-        k_is = []  # type: List[torch.Tensor]
+        k_is: List[torch.Tensor] = []
         for i in range(n_batch_x):
             istart, istop = i * batch_size, min((i + 1) * batch_size, n_x)
             x_batch = x[istart:istop]
             if preprocess_fn is not None:
                 x_batch = preprocess_fn(x_batch)
             x_batch = x_batch.to(device)  # type: ignore
-            k_ijs = []  # type: List[torch.Tensor]
+            k_ijs: List[torch.Tensor] = []
             for j in range(n_batch_y):
                 jstart, jstop = j * batch_size, min((j + 1) * batch_size, n_y)
                 y_batch = y[jstart:jstop]
                 if preprocess_fn is not None:
                     y_batch = preprocess_fn(y_batch)
                 y_batch = y_batch.to(device)  # type: ignore
-                k_ijs.append(kernel(x_batch, y_batch).cpu())  # type: ignore
+                k_ijs.append(kernel(x_batch, y_batch).cpu())
             k_is.append(torch.cat(k_ijs, 1))
         k_mat = torch.cat(k_is, 0)
     return k_mat
@@ -145,7 +145,7 @@ def mmd2(x: torch.Tensor, y: torch.Tensor, kernel: Callable) -> float:
     """
     n, m = x.shape[0], y.shape[0]
     c_xx, c_yy = 1 / (n * (n - 1)), 1 / (m * (m - 1))
-    k_xx, k_yy, k_xy = kernel(x, x), kernel(y, y), kernel(x, y)  # type: ignore
+    k_xx, k_yy, k_xy = kernel(x, x), kernel(y, y), kernel(x, y)
     return c_xx * (k_xx.sum() - k_xx.trace()) + c_yy * (k_yy.sum() - k_yy.trace()) - 2. * k_xy.mean()
 
 
@@ -182,7 +182,7 @@ def permed_lsdds(
 
     Returns
     -------
-    Vector of B LSDD estimates for each permutation, H_lam_inv which may have been inferred, and optionally
+    Vector of B LSDD estimates for each permutation, H_lam_inv which may have been inferred, and optionally \
     the unpermed LSDD estimate.
     """
 

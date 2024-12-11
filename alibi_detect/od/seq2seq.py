@@ -7,6 +7,7 @@ from alibi_detect.models.tensorflow.autoencoder import Seq2Seq, EncoderLSTM, Dec
 from alibi_detect.models.tensorflow.trainer import trainer
 from alibi_detect.base import BaseDetector, FitMixin, ThresholdMixin, outlier_prediction_dict
 from alibi_detect.utils.tensorflow.prediction import predict_batch
+from alibi_detect.utils._types import OptimizerTF
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +84,14 @@ class OutlierSeq2Seq(BaseDetector, FitMixin, ThresholdMixin):
                             '`latent_dim` (int) or `threshold_net` (tf.keras.Sequential)')
 
         # set metadata
-        self.meta['detector_type'] = 'offline'
+        self.meta['detector_type'] = 'outlier'
         self.meta['data_type'] = 'time-series'
+        self.meta['online'] = False
 
     def fit(self,
             X: np.ndarray,
             loss_fn: tf.keras.losses = tf.keras.losses.mse,
-            optimizer: tf.keras.optimizers = tf.keras.optimizers.Adam(learning_rate=1e-3),
+            optimizer: OptimizerTF = tf.keras.optimizers.Adam,
             epochs: int = 20,
             batch_size: int = 64,
             verbose: bool = True,
@@ -128,6 +130,7 @@ class OutlierSeq2Seq(BaseDetector, FitMixin, ThresholdMixin):
 
         # train arguments
         args = [self.seq2seq, loss_fn, X]
+        optimizer = optimizer() if isinstance(optimizer, type) else optimizer
         kwargs = {'y_train': y,
                   'optimizer': optimizer,
                   'epochs': epochs,
@@ -300,9 +303,9 @@ class OutlierSeq2Seq(BaseDetector, FitMixin, ThresholdMixin):
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the model's metadata.
-        'data' contains the outlier predictions and both feature and instance level outlier scores.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the model's metadata.
+            - ``'data'`` contains the outlier predictions and both feature and instance level outlier scores.
         """
         # compute outlier scores
         fscore, iscore = self.score(X, outlier_perc=outlier_perc, batch_size=batch_size)

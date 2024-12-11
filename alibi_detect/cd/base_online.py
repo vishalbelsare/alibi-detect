@@ -1,27 +1,34 @@
-from abc import abstractmethod
 import logging
+import warnings
+from abc import abstractmethod
+from typing import Any, Callable, Dict, List, Optional, Union, Tuple, TYPE_CHECKING
+
 import numpy as np
-from typing import Any, Callable, Dict,  Optional, Union, List
 from alibi_detect.base import BaseDetector, concept_drift_dict
 from alibi_detect.cd.utils import get_input_shape
-from alibi_detect.utils.frameworks import has_pytorch, has_tensorflow
+from alibi_detect.utils.state import StateMixin
+from alibi_detect.utils._types import Literal
 
-if has_pytorch:
-    import torch  # noqa F401
-
-if has_tensorflow:
-    import tensorflow as tf  # noqa F401
+if TYPE_CHECKING:
+    import torch
+    import tensorflow as tf
 
 logger = logging.getLogger(__name__)
 
 
-class BaseMultiDriftOnline(BaseDetector):
+class BaseMultiDriftOnline(BaseDetector, StateMixin):
+    t: int = 0
+    thresholds: np.ndarray
+    backend: Literal['pytorch', 'tensorflow']
+    online_state_keys: Tuple[str, ...]
+
     def __init__(
             self,
             x_ref: Union[np.ndarray, list],
             ert: float,
             window_size: int,
             preprocess_fn: Optional[Callable] = None,
+            x_ref_preprocessed: bool = False,
             n_bootstraps: int = 1000,
             verbose: bool = True,
             input_shape: Optional[tuple] = None,
@@ -43,6 +50,10 @@ class BaseMultiDriftOnline(BaseDetector):
             ability to detect slight drift.
         preprocess_fn
             Function to preprocess the data before computing the data drift metrics.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         n_bootstraps
             The number of bootstrap simulations used to configure the thresholds. The larger this is the
             more accurately the desired ERT will be targeted. Should ideally be at least an order of magnitude
@@ -60,18 +71,21 @@ class BaseMultiDriftOnline(BaseDetector):
             logger.warning('No expected run-time set for the drift threshold. Need to set it to detect data drift.')
 
         self.ert = ert
-        self.fpr = 1/ert
+        self.fpr = 1 / ert
         self.window_size = window_size
 
-        # Preprocess reference data
-        if isinstance(preprocess_fn, Callable):  # type: ignore
+        # x_ref preprocessing
+        self.x_ref_preprocessed = x_ref_preprocessed
+        if preprocess_fn is not None and not isinstance(preprocess_fn, Callable):  # type: ignore[arg-type]
+            raise ValueError("`preprocess_fn` is not a valid Callable.")
+        if not self.x_ref_preprocessed and preprocess_fn is not None:
             self.x_ref = preprocess_fn(x_ref)
         else:
             self.x_ref = x_ref
 
         # Other attributes
         self.preprocess_fn = preprocess_fn
-        self.n = len(x_ref)  # type: ignore
+        self.n = len(x_ref)
         self.n_bootstraps = n_bootstraps  # nb of samples used to estimate thresholds
         self.verbose = verbose
 
@@ -79,8 +93,9 @@ class BaseMultiDriftOnline(BaseDetector):
         self.input_shape = get_input_shape(input_shape, x_ref)
 
         # set metadata
-        self.meta['detector_type'] = 'online'
+        self.meta['detector_type'] = 'drift'
         self.meta['data_type'] = data_type
+        self.meta['online'] = True
 
     @abstractmethod
     def _configure_thresholds(self):
@@ -108,25 +123,54 @@ class BaseMultiDriftOnline(BaseDetector):
         The preprocessed test instance `x_t`.
         """
         # preprocess if necessary
-        if isinstance(self.preprocess_fn, Callable):  # type: ignore
+        if self.preprocess_fn is not None:
             x_t = x_t[None, :] if isinstance(x_t, np.ndarray) else [x_t]
-            x_t = self.preprocess_fn(x_t)[0]  # type: ignore
+            x_t = self.preprocess_fn(x_t)[0]
         return x_t[None, :]
 
     def get_threshold(self, t: int) -> float:
-        return self.thresholds[t] if t < self.window_size else self.thresholds[-1]  # type: ignore
+        """
+        Return the threshold for timestep `t`.
 
-    def _initialise(self) -> None:
+        Parameters
+        ----------
+        t
+            The timestep to return a threshold for.
+
+        Returns
+        -------
+        The threshold at timestep `t`.
+        """
+        return self.thresholds[t] if t < self.window_size else self.thresholds[-1]
+
+    def _initialise_state(self) -> None:
+        """
+        Initialise online state (the stateful attributes updated by `score` and `predict`).
+
+        If a subclassed detector has additional online state, an additional `_initialise_state` should be defined,
+        with a call to `super()._initialise_state()` included (see `LSDDDriftOnlineTorch._initialise_state()` for
+        an example).
+        """
         self.t = 0  # corresponds to a test set of ref data
         self.test_stats = np.array([])
         self.drift_preds = np.array([])
-        self._configure_ref_subset()
 
     def reset(self) -> None:
-        "Resets the detector but does not reconfigure thresholds."
-        self._initialise()
+        """
+        Deprecated reset method. This method will be repurposed or removed in the future. To reset the detector to
+        its initial state (`t=0`) use :meth:`reset_state`.
+        """
+        self.reset_state()
+        warnings.warn('This method is deprecated and will be removed/repurposed in the future. To reset the detector '
+                      'to its initial state use `reset_state`.', DeprecationWarning)
 
-    def predict(self, x_t: Union[np.ndarray, Any],  return_test_stat: bool = True,
+    def reset_state(self) -> None:
+        """
+        Resets the detector to its initial state (`t=0`). This does not include reconfiguring thresholds.
+        """
+        self._initialise_state()
+
+    def predict(self, x_t: Union[np.ndarray, Any], return_test_stat: bool = True,
                 ) -> Dict[Dict[str, str], Dict[str, Union[int, float]]]:
         """
         Predict whether the most recent window of data has drifted from the reference data.
@@ -140,9 +184,9 @@ class BaseMultiDriftOnline(BaseDetector):
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the model's metadata.
-        'data' contains the drift prediction and optionally the test-statistic and threshold.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the model's metadata.
+            - ``'data'`` contains the drift prediction and optionally the test-statistic and threshold.
         """
         # Compute test stat and check for drift
         test_stat = self.score(x_t)
@@ -165,13 +209,18 @@ class BaseMultiDriftOnline(BaseDetector):
         return cd
 
 
-class BaseUniDriftOnline(BaseDetector):
+class BaseUniDriftOnline(BaseDetector, StateMixin):
+    t: int = 0
+    thresholds: np.ndarray
+    online_state_keys: Tuple[str, ...]
+
     def __init__(
             self,
             x_ref: Union[np.ndarray, list],
             ert: float,
             window_sizes: List[int],
             preprocess_fn: Optional[Callable] = None,
+            x_ref_preprocessed: bool = False,
             n_bootstraps: int = 1000,
             n_features: Optional[int] = None,
             verbose: bool = True,
@@ -196,6 +245,10 @@ class BaseUniDriftOnline(BaseDetector):
             ability to detect slight drift.
         preprocess_fn
             Function to preprocess the data before computing the data drift metrics.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         n_bootstraps
             The number of bootstrap simulations used to configure the thresholds. The larger this is the
             more accurately the desired ERT will be targeted. Should ideally be at least an order of magnitude
@@ -217,15 +270,18 @@ class BaseUniDriftOnline(BaseDetector):
             logger.warning('No expected run-time set for the drift threshold. Need to set it to detect data drift.')
 
         self.ert = ert
-        self.fpr = 1/ert
+        self.fpr = 1 / ert
 
         # Window sizes
         self.window_sizes = window_sizes
         self.max_ws = np.max(self.window_sizes)
         self.min_ws = np.min(self.window_sizes)
 
-        # Preprocess reference data
-        if isinstance(preprocess_fn, Callable):  # type: ignore
+        # x_ref preprocessing
+        self.x_ref_preprocessed = x_ref_preprocessed
+        if preprocess_fn is not None and not isinstance(preprocess_fn, Callable):  # type: ignore[arg-type]
+            raise ValueError("`preprocess_fn` is not a valid Callable.")
+        if not self.x_ref_preprocessed and preprocess_fn is not None:
             self.x_ref = preprocess_fn(x_ref)
         else:
             self.x_ref = x_ref
@@ -234,14 +290,14 @@ class BaseUniDriftOnline(BaseDetector):
 
         # Other attributes
         self.preprocess_fn = preprocess_fn
-        self.n = len(x_ref)  # type: ignore
+        self.n = len(x_ref)
         self.n_bootstraps = n_bootstraps  # nb of samples used to estimate thresholds
         self.verbose = verbose
 
         # compute number of features for the univariate tests
         if isinstance(n_features, int):
             self.n_features = n_features
-        elif not isinstance(preprocess_fn, Callable):
+        elif not isinstance(preprocess_fn, Callable) or x_ref_preprocessed:
             # infer features from preprocessed reference data
             self.n_features = self.x_ref.reshape(self.x_ref.shape[0], -1).shape[-1]
         else:  # infer number of features after applying preprocessing step
@@ -252,8 +308,9 @@ class BaseUniDriftOnline(BaseDetector):
         self.input_shape = get_input_shape(input_shape, x_ref)
 
         # set metadata
-        self.meta['detector_type'] = 'online'
+        self.meta['detector_type'] = 'drift'
         self.meta['data_type'] = data_type
+        self.meta['online'] = True
 
     @abstractmethod
     def _configure_thresholds(self):
@@ -268,10 +325,24 @@ class BaseUniDriftOnline(BaseDetector):
         pass
 
     def _check_x(self, x: Any, x_ref: bool = False) -> np.ndarray:
+        """
+        Check the type and shape of the data `x`, and coerces it to the correct shape if possible.
+
+        Parameters
+        ----------
+        x
+            The data to be checked.
+        x_ref
+            Whether `x` is a batch of reference data instances (if `True`), or a single test data instance (if `False`).
+
+        Returns
+        -------
+        The checked data, coerced to be a np.ndarray of the correct shape.
+        """
         # Check the type of x
         if isinstance(x, np.ndarray):
             pass
-        elif isinstance(x, (int, float, np.int, np.float)):
+        elif isinstance(x, (int, float)):
             x = np.array([x])
         else:
             raise TypeError("Detectors expect data to be 2D np.ndarray's. If data is passed as another type, a "
@@ -301,31 +372,61 @@ class BaseUniDriftOnline(BaseDetector):
         The preprocessed test instance `x_t`.
         """
         # preprocess if necessary
-        if isinstance(self.preprocess_fn, Callable):  # type: ignore
+        if self.preprocess_fn is not None:
             x_t = x_t[None, :] if isinstance(x_t, np.ndarray) else [x_t]
-            x_t = self.preprocess_fn(x_t)[0]  # type: ignore
+            x_t = self.preprocess_fn(x_t)[0]
         # Now check the final data is a 2D ndarray
         x_t = self._check_x(x_t)
         return x_t
 
     def get_threshold(self, t: int) -> np.ndarray:
-        return self.thresholds[t] if t < len(self.thresholds) else self.thresholds[-1]  # type: ignore
+        """
+        Return the threshold for timestep `t`.
 
-    def _initialise(self) -> None:
+        Parameters
+        ----------
+        t
+            The timestep to return a threshold for.
+
+        Returns
+        -------
+        The threshold at timestep `t`.
+        """
+        return self.thresholds[t] if t < len(self.thresholds) else self.thresholds[-1]
+
+    def _initialise_state(self) -> None:
+        """
+        Initialise online state (the stateful attributes updated by `score` and `predict`).
+
+        If a subclassed detector has additional online state, an additional `_initialise_state` should be defined,
+        with a call to `super()._initialise_state()` included (see `CVMDriftOnlineTorch._initialise_state()` for
+        an example).
+        """
         self.t = 0
+        self.xs = np.array([])
         self.test_stats = np.empty([0, len(self.window_sizes), self.n_features])
         self.drift_preds = np.array([])
-        self._configure_ref()
 
     @abstractmethod
     def _check_drift(self, test_stats: np.ndarray, thresholds: np.ndarray) -> int:
         pass
 
     def reset(self) -> None:
-        "Resets the detector but does not reconfigure thresholds."
-        self._initialise()
+        """
+        Deprecated reset method. This method will be repurposed or removed in the future. To reset the detector to
+        its initial state (`t=0`) use :meth:`reset_state`.
+        """
+        self.reset_state()
+        warnings.warn('This method is deprecated and will be removed/repurposed in the future. To reset the detector '
+                      'to its initial state use `reset_state`.', DeprecationWarning)
 
-    def predict(self, x_t: Union[np.ndarray, Any],  return_test_stat: bool = True,
+    def reset_state(self) -> None:
+        """
+        Resets the detector to its initial state (`t=0`). This does not include reconfiguring thresholds.
+        """
+        self._initialise_state()
+
+    def predict(self, x_t: Union[np.ndarray, Any], return_test_stat: bool = True,
                 ) -> Dict[Dict[str, str], Dict[str, Union[int, float]]]:
         """
         Predict whether the most recent window(s) of data have drifted from the reference data.
@@ -339,13 +440,13 @@ class BaseUniDriftOnline(BaseDetector):
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the model's metadata.
-        'data' contains the drift prediction and optionally the test-statistic and threshold.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the model's metadata.
+            - ``'data'`` contains the drift prediction and optionally the test-statistic and threshold.
         """
         # Compute test stat and check for drift
         test_stats = self.score(x_t)
-        thresholds = self.get_threshold(self.t-1)  # Note t-1 here, has we wish to use the unconditional thresholds
+        thresholds = self.get_threshold(self.t - 1)  # Note t-1 here, has we wish to use the unconditional thresholds
         drift_pred = self._check_drift(test_stats, thresholds)
 
         # Update results attributes

@@ -1,13 +1,44 @@
+import inspect
 from functools import partial
+from typing import Any, Callable, Dict, Type, Union
+
 import numpy as np
 import tensorflow as tf
-from typing import Callable, Union
 from alibi_detect.utils.prediction import tokenize_transformer
 
 
-def predict_batch(x: Union[list, np.ndarray, tf.Tensor], model: Union[Callable, tf.keras.Model],
-                  batch_size: int = int(1e10), preprocess_fn: Callable = None,
-                  dtype: Union[np.dtype, tf.DType] = np.float32) -> Union[np.ndarray, tf.Tensor, tuple]:
+def get_call_arg_mapping(model: tf.keras.Model, x: Any) -> Dict[str, Any]:
+    """ Generates a dictionary mapping the first argument name of the
+    `call` method of a Keras model to the provided input value.
+
+    This function is particularly useful when working with Keras 3,
+    which enforces stricter input handling and requires named arguments
+    for certain operations. It extracts the argument names from the
+    `call` method of the provided model and maps the first argument to `x`.
+
+    Parameters
+    ----------
+    model
+        Model to extract argument names from.
+    x
+        Input data.
+
+    Returns
+    -------
+    Dictionary with named arguments.
+    """
+    signature = inspect.signature(model.call)
+    arg_names = [param.name for param in signature.parameters.values()]
+    return {arg_names[0]: x}
+
+
+def predict_batch(
+    x: Union[list, np.ndarray, tf.Tensor],
+    model: Union[Callable, tf.keras.Model],
+    batch_size: int = int(1e10),
+    preprocess_fn: Callable = None,
+    dtype: Union[Type[np.generic], tf.DType] = np.float32
+) -> Union[np.ndarray, tf.Tensor, tuple]:
     """
     Make batch predictions on a model.
 
@@ -32,13 +63,19 @@ def predict_batch(x: Union[list, np.ndarray, tf.Tensor], model: Union[Callable, 
     n_minibatch = int(np.ceil(n / batch_size))
     return_np = not isinstance(dtype, tf.DType)
     return_list = False
-    preds = []  # type: Union[list, tuple]
+    preds: Union[list, tuple] = []
     for i in range(n_minibatch):
         istart, istop = i * batch_size, min((i + 1) * batch_size, n)
         x_batch = x[istart:istop]
         if isinstance(preprocess_fn, Callable):  # type: ignore
             x_batch = preprocess_fn(x_batch)
-        preds_tmp = model(x_batch)
+
+        if not isinstance(x_batch, (np.ndarray, tf.Tensor)):
+            x_batch = get_call_arg_mapping(model, x_batch)
+            preds_tmp = model(**x_batch)
+        else:
+            preds_tmp = model(x_batch)
+
         if isinstance(preds_tmp, (list, tuple)):
             if len(preds) == 0:  # init tuple with lists to store predictions
                 preds = tuple([] for _ in range(len(preds_tmp)))
@@ -60,7 +97,7 @@ def predict_batch(x: Union[list, np.ndarray, tf.Tensor], model: Union[Callable, 
 
 def predict_batch_transformer(x: Union[list, np.ndarray], model: tf.keras.Model, tokenizer: Callable,
                               max_len: int, batch_size: int = int(1e10),
-                              dtype: Union[np.float32, tf.DType] = np.float32) \
+                              dtype: Union[Type[np.generic], tf.DType] = np.float32) \
         -> Union[np.ndarray, tf.Tensor]:
     """
     Make batch predictions using a transformers tokenizer and model.

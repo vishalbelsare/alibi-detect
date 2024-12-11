@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Any, Callable, List, Optional, Union
+from alibi_detect.base import DriftConfigMixin
 from alibi_detect.cd.base_online import BaseUniDriftOnline
 from alibi_detect.utils.misc import quantile
 import numba as nb
@@ -7,13 +8,16 @@ from tqdm import tqdm
 import warnings
 
 
-class CVMDriftOnline(BaseUniDriftOnline):
+class CVMDriftOnline(BaseUniDriftOnline, DriftConfigMixin):
+    online_state_keys = ('t', 'test_stats', 'drift_preds', 'xs', 'ids_ref_wins', 'ids_wins_ref', 'ids_wins_wins')
+
     def __init__(
             self,
             x_ref: Union[np.ndarray, list],
             ert: float,
             window_sizes: List[int],
             preprocess_fn: Optional[Callable] = None,
+            x_ref_preprocessed: bool = False,
             n_bootstraps: int = 10000,
             batch_size: int = 64,
             n_features: Optional[int] = None,
@@ -50,6 +54,10 @@ class CVMDriftOnline(BaseUniDriftOnline):
             ability to detect slight drift.
         preprocess_fn
             Function to preprocess the data before computing the data drift metrics.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         n_bootstraps
             The number of bootstrap simulations used to configure the thresholds. The larger this is the
             more accurately the desired ERT will be targeted. Should ideally be at least an order of magnitude
@@ -73,19 +81,27 @@ class CVMDriftOnline(BaseUniDriftOnline):
             ert=ert,
             window_sizes=window_sizes,
             preprocess_fn=preprocess_fn,
+            x_ref_preprocessed=x_ref_preprocessed,
             n_bootstraps=n_bootstraps,
             n_features=n_features,
             verbose=verbose,
             input_shape=input_shape,
             data_type=data_type
         )
+        # Set config
+        self._set_config(locals())
+
         self.batch_size = n_bootstraps if batch_size is None else batch_size
 
         # Configure thresholds and initialise detector
-        self._initialise()
+        self._initialise_state()
         self._configure_thresholds()
+        self._configure_ref()
 
     def _configure_ref(self) -> None:
+        """
+        Configure the reference data.
+        """
         ids_ref_ref = self.x_ref[None, :, :] >= self.x_ref[:, None, :]
         self.ref_cdf_ref = np.sum(ids_ref_ref, axis=0) / self.n
 
@@ -152,6 +168,14 @@ class CVMDriftOnline(BaseUniDriftOnline):
         return stats
 
     def _update_state(self, x_t: np.ndarray):
+        """
+        Update online state based on the provided test instance.
+
+        Parameters
+        ----------
+        x_t
+            The test instance.
+        """
         self.t += 1
         if self.t == 1:
             # Initialise stream
@@ -175,6 +199,15 @@ class CVMDriftOnline(BaseUniDriftOnline):
             self.ids_wins_wins = np.concatenate(
                 [self.ids_wins_wins, (x_t <= self.xs[-self.max_ws:, :])[None, :, :]], 0
             )
+
+    def _initialise_state(self) -> None:
+        """
+        Initialise online state (the stateful attributes updated by `score` and `predict`).
+        """
+        super()._initialise_state()
+        self.ids_ref_wins = np.array([])
+        self.ids_wins_ref = np.array([])
+        self.ids_wins_wins = np.array([])
 
     def score(self, x_t: Union[np.ndarray, Any]) -> np.ndarray:
         """

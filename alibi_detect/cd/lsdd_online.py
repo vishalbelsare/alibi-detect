@@ -1,6 +1,9 @@
+import os
 import numpy as np
 from typing import Any, Callable, Dict, Optional, Union
-from alibi_detect.utils.frameworks import has_pytorch, has_tensorflow
+from alibi_detect.utils.frameworks import has_pytorch, has_tensorflow, BackendValidator, Framework
+from alibi_detect.base import DriftConfigMixin
+from alibi_detect.utils._types import TorchDeviceType
 
 if has_pytorch:
     from alibi_detect.cd.pytorch.lsdd_online import LSDDDriftOnlineTorch
@@ -9,7 +12,7 @@ if has_tensorflow:
     from alibi_detect.cd.tensorflow.lsdd_online import LSDDDriftOnlineTF
 
 
-class LSDDDriftOnline:
+class LSDDDriftOnline(DriftConfigMixin):
     def __init__(
             self,
             x_ref: Union[np.ndarray, list],
@@ -17,11 +20,12 @@ class LSDDDriftOnline:
             window_size: int,
             backend: str = 'tensorflow',
             preprocess_fn: Optional[Callable] = None,
+            x_ref_preprocessed: bool = False,
             sigma: Optional[np.ndarray] = None,
             n_bootstraps: int = 1000,
             n_kernel_centers: Optional[int] = None,
             lambda_rd_max: float = 0.2,
-            device: Optional[str] = None,
+            device: TorchDeviceType = None,
             verbose: bool = True,
             input_shape: Optional[tuple] = None,
             data_type: Optional[str] = None
@@ -45,7 +49,11 @@ class LSDDDriftOnline:
         backend
             Backend used for the LSDD implementation and configuration.
         preprocess_fn
-            Function to preprocess the data before computing the data drift metrics.s
+            Function to preprocess the data before computing the data drift metrics.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         sigma
             Optionally set the bandwidth of the Gaussian kernel used in estimating the LSDD. Can also pass multiple
             bandwidth values as an array. The kernel evaluation is then averaged over those bandwidths. If `sigma`
@@ -62,8 +70,9 @@ class LSDDDriftOnline:
             The maximum relative difference between two estimates of LSDD that the regularization parameter
             lambda is allowed to cause. Defaults to 0.2 as in the paper.
         device
-            Device type used. The default None tries to use the GPU and falls back on CPU if needed.
-            Can be specified by passing either 'cuda', 'gpu' or 'cpu'. Only relevant for 'pytorch' backend.
+            Device type used. The default tries to use the GPU and falls back on CPU if needed.
+            Can be specified by passing either ``'cuda'``, ``'gpu'``, ``'cpu'`` or an instance of
+            ``torch.device``. Only relevant for 'pytorch' backend.
         verbose
             Whether or not to print progress during configuration.
         input_shape
@@ -73,21 +82,24 @@ class LSDDDriftOnline:
         """
         super().__init__()
 
+        # Set config
+        self._set_config(locals())
+
         backend = backend.lower()
-        if backend == 'tensorflow' and not has_tensorflow or backend == 'pytorch' and not has_pytorch:
-            raise ImportError(f'{backend} not installed. Cannot initialize and run the '
-                              f'MMDDrift detector with {backend} backend.')
-        elif backend not in ['tensorflow', 'pytorch']:
-            raise NotImplementedError(f'{backend} not implemented. Use tensorflow or pytorch instead.')
+        BackendValidator(
+            backend_options={Framework.TENSORFLOW: [Framework.TENSORFLOW],
+                             Framework.PYTORCH: [Framework.PYTORCH]},
+            construct_name=self.__class__.__name__
+        ).verify_backend(backend)
 
         kwargs = locals()
         args = [kwargs['x_ref'], kwargs['ert'], kwargs['window_size']]
         pop_kwargs = ['self', 'x_ref', 'ert', 'window_size', 'backend', '__class__']
         [kwargs.pop(k, None) for k in pop_kwargs]
 
-        if backend == 'tensorflow' and has_tensorflow:
+        if backend == Framework.TENSORFLOW:
             kwargs.pop('device', None)
-            self._detector = LSDDDriftOnlineTF(*args, **kwargs)  # type: ignore
+            self._detector = LSDDDriftOnlineTF(*args, **kwargs)
         else:
             self._detector = LSDDDriftOnlineTorch(*args, **kwargs)  # type: ignore
         self.meta = self._detector.meta
@@ -104,9 +116,11 @@ class LSDDDriftOnline:
     def thresholds(self):
         return [self._detector.thresholds[min(s, self._detector.window_size-1)] for s in range(self.t)]
 
-    def reset(self):
-        "Resets the detector but does not reconfigure thresholds."
-        self._detector.reset()
+    def reset_state(self):
+        """
+        Resets the detector to its initial state (`t=0`). This does not include reconfiguring thresholds.
+        """
+        self._detector.reset_state()
 
     def predict(self, x_t: Union[np.ndarray, Any], return_test_stat: bool = True) \
             -> Dict[Dict[str, str], Dict[str, Union[int, float]]]:
@@ -122,9 +136,9 @@ class LSDDDriftOnline:
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the model's metadata.
-        'data' contains the drift prediction and optionally the test-statistic and threshold.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the model's metadata.
+            - ``'data'`` contains the drift prediction and optionally the test-statistic and threshold.
         """
         return self._detector.predict(x_t, return_test_stat)
 
@@ -142,3 +156,39 @@ class LSDDDriftOnline:
         LSDD estimate between reference window and test window.
         """
         return self._detector.score(x_t)
+
+    def get_config(self) -> dict:  # Needed due to need to unnormalize x_ref
+        """
+        Get the detector's configuration dictionary.
+
+        Returns
+        -------
+        The detector's configuration dictionary.
+        """
+        cfg = super().get_config()
+        # Unnormalize x_ref
+        cfg['x_ref'] = self._detector._unnormalize(cfg['x_ref'])
+        return cfg
+
+    def save_state(self, filepath: Union[str, os.PathLike]):
+        """
+        Save a detector's state to disk in order to generate a checkpoint.
+
+        Parameters
+        ----------
+        filepath
+            The directory to save state to.
+        """
+        self._detector.save_state(filepath)
+
+    def load_state(self, filepath: Union[str, os.PathLike]):
+        """
+        Load the detector's state from disk, in order to restart from a checkpoint previously generated with
+        :meth:`~save_state`.
+
+        Parameters
+        ----------
+        filepath
+            The directory to load state from.
+        """
+        self._detector.load_state(filepath)

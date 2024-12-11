@@ -3,21 +3,27 @@ import numpy as np
 import torch
 from typing import Any, Callable, Optional, Union
 from alibi_detect.cd.base_online import BaseMultiDriftOnline
+from alibi_detect.utils.pytorch import get_device
 from alibi_detect.utils.pytorch.kernels import GaussianRBF
 from alibi_detect.utils.pytorch import zero_diag, quantile
+from alibi_detect.utils.frameworks import Framework
+from alibi_detect.utils._types import TorchDeviceType
 
 
 class MMDDriftOnlineTorch(BaseMultiDriftOnline):
+    online_state_keys: tuple = ('t', 'test_stats', 'drift_preds', 'test_window', 'k_xy')
+
     def __init__(
             self,
             x_ref: Union[np.ndarray, list],
             ert: float,
             window_size: int,
             preprocess_fn: Optional[Callable] = None,
+            x_ref_preprocessed: bool = False,
             kernel: Callable = GaussianRBF,
             sigma: Optional[np.ndarray] = None,
             n_bootstraps: int = 1000,
-            device: Optional[str] = None,
+            device: TorchDeviceType = None,
             verbose: bool = True,
             input_shape: Optional[tuple] = None,
             data_type: Optional[str] = None
@@ -38,6 +44,10 @@ class MMDDriftOnlineTorch(BaseMultiDriftOnline):
             ability to detect slight drift.
         preprocess_fn
             Function to preprocess the data before computing the data drift metrics.
+        x_ref_preprocessed
+            Whether the given reference data `x_ref` has been preprocessed yet. If `x_ref_preprocessed=True`, only
+            the test data `x` will be preprocessed at prediction time. If `x_ref_preprocessed=False`, the reference
+            data will also be preprocessed.
         kernel
             Kernel used for the MMD computation, defaults to Gaussian RBF kernel.
         sigma
@@ -49,8 +59,9 @@ class MMDDriftOnlineTorch(BaseMultiDriftOnline):
             more accurately the desired ERT will be targeted. Should ideally be at least an order of magnitude
             larger than the ERT.
         device
-            Device type used. The default None tries to use the GPU and falls back on CPU if needed.
-            Can be specified by passing either 'cuda', 'gpu' or 'cpu'. Only relevant for 'pytorch' backend.
+            Device type used. The default tries to use the GPU and falls back on CPU if needed.
+            Can be specified by passing either ``'cuda'``, ``'gpu'``, ``'cpu'`` or an instance of
+            ``torch.device``. Only relevant for 'pytorch' backend.
         verbose
             Whether or not to print progress during configuration.
         input_shape
@@ -63,23 +74,21 @@ class MMDDriftOnlineTorch(BaseMultiDriftOnline):
             ert=ert,
             window_size=window_size,
             preprocess_fn=preprocess_fn,
+            x_ref_preprocessed=x_ref_preprocessed,
             n_bootstraps=n_bootstraps,
             verbose=verbose,
             input_shape=input_shape,
             data_type=data_type
         )
-        self.meta.update({'backend': 'pytorch'})
+        self.backend = Framework.PYTORCH.value
+        self.meta.update({'backend': self.backend})
 
-        # set backend
-        if device is None or device.lower() in ['gpu', 'cuda']:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            if self.device.type == 'cpu':
-                print('No GPU detected, fall back on CPU.')
-        else:
-            self.device = torch.device('cpu')
+        # set device
+        self.device = get_device(device)
 
         # initialize kernel
-        sigma = torch.from_numpy(sigma).to(self.device) if isinstance(sigma, np.ndarray) else None
+        sigma = torch.from_numpy(sigma).to(self.device) if isinstance(sigma,  # type: ignore[assignment]
+                                                                      np.ndarray) else None
         self.kernel = kernel(sigma) if kernel == GaussianRBF else kernel
 
         # compute kernel matrix for the reference data
@@ -87,10 +96,23 @@ class MMDDriftOnlineTorch(BaseMultiDriftOnline):
         self.k_xx = self.kernel(self.x_ref, self.x_ref, infer_sigma=(sigma is None))
 
         self._configure_thresholds()
-        self._initialise()
+        self._configure_ref_subset()  # self.initialise_state() called inside here
+
+    def _initialise_state(self) -> None:
+        """
+        Initialise online state (the stateful attributes updated by `score` and `predict`). This method relies on
+        attributes defined by `_configure_ref_subset`, hence must be called afterwards.
+        """
+        super()._initialise_state()
+        self.test_window = self.x_ref[self.init_test_inds]
+        self.k_xy = self.kernel(self.x_ref[self.ref_inds], self.test_window)
 
     def _configure_ref_subset(self):
-        etw_size = 2*self.window_size-1  # etw = extended test window
+        """
+        Configure the reference data split. If the randomly selected split causes an initial detection, further splits
+        are attempted.
+        """
+        etw_size = 2 * self.window_size - 1  # etw = extended test window
         rw_size = self.n - etw_size  # rw = ref-window
         # Make split and ensure it doesn't cause an initial detection
         mmd_init = None
@@ -98,26 +120,27 @@ class MMDDriftOnlineTorch(BaseMultiDriftOnline):
             # Make split
             perm = torch.randperm(self.n)
             self.ref_inds, self.init_test_inds = perm[:rw_size], perm[-self.window_size:]
-            self.test_window = self.x_ref[self.init_test_inds]
             # Compute initial mmd to check for initial detection
+            self._initialise_state()  # to set self.test_window and self.k_xy
             self.k_xx_sub = self.k_xx[self.ref_inds][:, self.ref_inds]
-            self.k_xx_sub_sum = zero_diag(self.k_xx_sub).sum()/(rw_size*(rw_size-1))
-            self.k_xy = self.kernel(self.x_ref[self.ref_inds], self.test_window)
+            self.k_xx_sub_sum = zero_diag(self.k_xx_sub).sum() / (rw_size * (rw_size - 1))
             k_yy = self.kernel(self.test_window, self.test_window)
             mmd_init = (
-                self.k_xx_sub_sum +
-                zero_diag(k_yy).sum()/(self.window_size*(self.window_size-1)) -
-                2*self.k_xy.mean()
+                    self.k_xx_sub_sum +
+                    zero_diag(k_yy).sum() / (self.window_size * (self.window_size - 1)) -
+                    2 * self.k_xy.mean()
             )
 
     def _configure_thresholds(self):
-
+        """
+        Configure the test statistic thresholds via bootstrapping.
+        """
         # Each bootstrap sample splits the reference samples into a sub-reference sample (x)
         # and an extended test window (y). The extended test window will be treated as W overlapping
         # test windows of size W (so 2W-1 test samples in total)
 
         w_size = self.window_size
-        etw_size = 2*w_size-1  # etw = extended test window
+        etw_size = 2 * w_size - 1  # etw = extended test window
         rw_size = self.n - etw_size  # rw = sub-ref window
 
         perms = [torch.randperm(self.n) for _ in range(self.n_bootstraps)]
@@ -136,28 +159,28 @@ class MMDDriftOnlineTorch(BaseMultiDriftOnline):
         k_xy_col_sums_all = [
             self.k_xx[x_inds][:, y_inds].sum(0) for x_inds, y_inds in
             (tqdm(zip(x_inds_all, y_inds_all), total=self.n_bootstraps) if self.verbose else
-                zip(x_inds_all, y_inds_all))
+             zip(x_inds_all, y_inds_all))
         ]
         k_xx_sums_all = [(
-            k_full_sum - zero_diag(self.k_xx[y_inds][:, y_inds]).sum() - 2*k_xy_col_sums.sum()
-        )/(rw_size*(rw_size-1)) for y_inds, k_xy_col_sums in zip(y_inds_all, k_xy_col_sums_all)]
-        k_xy_col_sums_all = [k_xy_col_sums/(rw_size*w_size) for k_xy_col_sums in k_xy_col_sums_all]
+                                 k_full_sum - zero_diag(self.k_xx[y_inds][:, y_inds]).sum() - 2 * k_xy_col_sums.sum()
+                         ) / (rw_size * (rw_size - 1)) for y_inds, k_xy_col_sums in zip(y_inds_all, k_xy_col_sums_all)]
+        k_xy_col_sums_all = [k_xy_col_sums / (rw_size * w_size) for k_xy_col_sums in k_xy_col_sums_all]
 
         # Now to iterate through the W overlapping windows
         thresholds = []
         p_bar = tqdm(range(w_size), "Computing thresholds") if self.verbose else range(w_size)
         for w in p_bar:
-            y_inds_all_w = [y_inds[w:w+w_size] for y_inds in y_inds_all]  # test windows of size w_size
+            y_inds_all_w = [y_inds[w:w + w_size] for y_inds in y_inds_all]  # test windows of size w_size
             mmds = [(
-                k_xx_sum +
-                zero_diag(self.k_xx[y_inds_w][:, y_inds_w]).sum()/(w_size*(w_size-1)) -
-                2*k_xy_col_sums[w:w+w_size].sum()
-            ) for k_xx_sum, y_inds_w, k_xy_col_sums in zip(k_xx_sums_all, y_inds_all_w, k_xy_col_sums_all)
-            ]
+                    k_xx_sum +
+                    zero_diag(self.k_xx[y_inds_w][:, y_inds_w]).sum() / (w_size * (w_size - 1)) -
+                    2 * k_xy_col_sums[w:w + w_size].sum())
+                    for k_xx_sum, y_inds_w, k_xy_col_sums in zip(k_xx_sums_all, y_inds_all_w, k_xy_col_sums_all)
+                    ]
             mmds = torch.tensor(mmds)  # an mmd for each bootstrap sample
 
             # Now we discard all bootstrap samples for which mmd is in top (1/ert)% and record the thresholds
-            thresholds.append(quantile(mmds, 1-self.fpr))
+            thresholds.append(quantile(mmds, 1 - self.fpr))
             y_inds_all = [y_inds_all[i] for i in range(len(y_inds_all)) if mmds[i] < thresholds[-1]]
             k_xx_sums_all = [
                 k_xx_sums_all[i] for i in range(len(k_xx_sums_all)) if mmds[i] < thresholds[-1]
@@ -168,11 +191,19 @@ class MMDDriftOnlineTorch(BaseMultiDriftOnline):
 
         self.thresholds = thresholds
 
-    def _update_state(self, x_t: torch.Tensor):
+    def _update_state(self, x_t: torch.Tensor):  # type: ignore[override]
+        """
+        Update online state based on the provided test instance.
+
+        Parameters
+        ----------
+        x_t
+            The test instance.
+        """
         self.t += 1
         kernel_col = self.kernel(self.x_ref[self.ref_inds], x_t)
-        self.test_window = torch.cat([self.test_window[(1-self.window_size):], x_t], 0)
-        self.k_xy = torch.cat([self.k_xy[:, (1-self.window_size):], kernel_col], 1)
+        self.test_window = torch.cat([self.test_window[(1 - self.window_size):], x_t], 0)
+        self.k_xy = torch.cat([self.k_xy[:, (1 - self.window_size):], kernel_col], 1)
 
     def score(self, x_t: Union[np.ndarray, Any]) -> float:
         """
@@ -192,8 +223,8 @@ class MMDDriftOnlineTorch(BaseMultiDriftOnline):
         self._update_state(x_t)
         k_yy = self.kernel(self.test_window, self.test_window)
         mmd = (
-            self.k_xx_sub_sum +
-            zero_diag(k_yy).sum()/(self.window_size*(self.window_size-1)) -
-            2*self.k_xy.mean()
+                self.k_xx_sub_sum +
+                zero_diag(k_yy).sum() / (self.window_size * (self.window_size - 1)) -
+                2 * self.k_xy.mean()
         )
         return float(mmd.detach().cpu())

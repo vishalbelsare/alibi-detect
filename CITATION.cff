@@ -14,8 +14,11 @@ authors:
 - family-names: "Scillitoe"
   given-names: "Ashley"
   orcid: "https://orcid.org/0000-0001-8971-7224"
-
+- family-names: "Samoilescu"
+  given-names: "Robert"
+- family-names: "Athorne"
+  given-names: "Alex"
 title: "Alibi Detect: Algorithms for outlier, adversarial and drift detection"
-version: 0.7.3
-date-released: 2021-10-29
+version: 0.12.0
+date-released: 2024-04-17
 url: "https://github.com/SeldonIO/alibi-detect"

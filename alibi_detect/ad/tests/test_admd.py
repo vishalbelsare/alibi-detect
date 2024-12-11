@@ -42,7 +42,7 @@ def test_adv_md(adv_md_params):
     threshold, loss_type, threshold_perc, return_instance_score = adv_md_params
 
     # define ancillary model
-    layers = [tf.keras.layers.InputLayer(input_shape=(input_dim)),
+    layers = [tf.keras.layers.InputLayer(input_shape=(input_dim, )),
               tf.keras.layers.Dense(y.shape[1], activation=tf.nn.softmax)]
     distilled_model = tf.keras.Sequential(layers)
 
@@ -55,8 +55,8 @@ def test_adv_md(adv_md_params):
     )
 
     assert admd.threshold == threshold
-    assert admd.meta == {'name': 'ModelDistillation', 'detector_type': 'offline', 'data_type': None,
-                         'version': __version__}
+    assert admd.meta == {'name': 'ModelDistillation', 'detector_type': 'adversarial', 'data_type': None,
+                         'online': False, 'version': __version__}
     for layer in admd.model.layers:
         assert not layer.trainable
 

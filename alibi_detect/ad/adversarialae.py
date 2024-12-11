@@ -1,16 +1,19 @@
 import logging
+from typing import Callable, Dict, List, Tuple, Union, cast
+
 import numpy as np
 import tensorflow as tf
+from alibi_detect.base import (BaseDetector, FitMixin, ThresholdMixin,
+                               adversarial_correction_dict,
+                               adversarial_prediction_dict)
+from alibi_detect.models.tensorflow.autoencoder import AE
+from alibi_detect.models.tensorflow.losses import loss_adv_ae
+from alibi_detect.models.tensorflow.trainer import trainer
+from alibi_detect.utils.tensorflow.prediction import predict_batch
+from alibi_detect.utils._types import OptimizerTF
 from tensorflow.keras.layers import Dense, Flatten
 from tensorflow.keras.losses import kld
 from tensorflow.keras.models import Model
-from typing import Callable, Dict, List, Tuple, Union
-from alibi_detect.models.tensorflow.autoencoder import AE
-from alibi_detect.models.tensorflow.trainer import trainer
-from alibi_detect.models.tensorflow.losses import loss_adv_ae
-from alibi_detect.utils.tensorflow.prediction import predict_batch
-from alibi_detect.base import (BaseDetector, FitMixin, ThresholdMixin,
-                               adversarial_prediction_dict, adversarial_correction_dict)
 
 logger = logging.getLogger(__name__)
 
@@ -128,15 +131,16 @@ class AdversarialAE(BaseDetector, FitMixin, ThresholdMixin):
         self.temperature = temperature
 
         # set metadata
-        self.meta['detector_type'] = 'offline'
+        self.meta['detector_type'] = 'adversarial'
         self.meta['data_type'] = data_type
+        self.meta['online'] = False
 
     def fit(self,
             X: np.ndarray,
             loss_fn: tf.keras.losses = loss_adv_ae,
             w_model: float = 1.,
             w_recon: float = 0.,
-            optimizer: tf.keras.optimizers = tf.keras.optimizers.Adam(learning_rate=1e-3),
+            optimizer: OptimizerTF = tf.keras.optimizers.Adam,
             epochs: int = 20,
             batch_size: int = 128,
             verbose: bool = True,
@@ -174,6 +178,7 @@ class AdversarialAE(BaseDetector, FitMixin, ThresholdMixin):
         """
         # train arguments
         args = [self.ae, loss_fn, X]
+        optimizer = optimizer() if isinstance(optimizer, type) else optimizer
         kwargs = {
             'optimizer': optimizer,
             'epochs': epochs,
@@ -247,10 +252,12 @@ class AdversarialAE(BaseDetector, FitMixin, ThresholdMixin):
         # model predictions
         y = predict_batch(X, self.model, batch_size=batch_size)
         y_recon = predict_batch(X_recon, self.model, batch_size=batch_size)
+        y = cast(np.ndarray, y)  # help mypy out
+        y_recon = cast(np.ndarray, y_recon)  # help mypy out
 
         # scale predictions
         if self.temperature != 1.:
-            y = y ** (1 / self.temperature)  # type: ignore
+            y = y ** (1 / self.temperature)
             y = (y / tf.reshape(tf.reduce_sum(y, axis=-1), (-1, 1))).numpy()
 
         adv_score = kld(y, y_recon).numpy()
@@ -283,9 +290,9 @@ class AdversarialAE(BaseDetector, FitMixin, ThresholdMixin):
 
         Returns
         -------
-        Dictionary containing 'meta' and 'data' dictionaries.
-        'meta' has the model's metadata.
-        'data' contains the adversarial predictions and instance level adversarial scores.
+        Dictionary containing ``'meta'`` and ``'data'`` dictionaries.
+            - ``'meta'`` has the model's metadata.
+            - ``'data'`` contains the adversarial predictions and instance level adversarial scores.
         """
         adv_score = self.score(X, batch_size=batch_size)
 

@@ -57,14 +57,24 @@ extensions = [
     "sphinxcontrib.apidoc",  # automatically generate API docs, see https://github.com/rtfd/readthedocs.org/issues/1139
     "sphinxcontrib.bibtex",
     "nbsphinx",
-    "nbsphinx_link",  # for linking notebooks from outside sphinx source root
     "myst_parser",
+    "sphinx_design",
 ]
 
-# nbsphinx settings
+# -- nbsphinx settings -------------------------------------------------------
 nbsphinx_execute = "auto"
 
-# Bibliography
+# Create symlinks for example notebooks
+import glob
+nb_files = [os.path.basename(f) for f in glob.glob(os.path.join('examples','*.ipynb')) 
+        if not os.path.basename(f).startswith('temp_')]
+for nb_file in nb_files:
+    target = os.path.join('../../examples', nb_file)
+    if os.path.exists(target):
+        os.remove(target)
+    os.symlink(os.path.join('../doc/source/examples', nb_file), target)
+
+# -- Bibliography ------------------------------------------------------------
 bibtex_bibfiles = ['refs.bib']
 bibtex_default_style = 'unsrtalpha'
 
@@ -77,8 +87,9 @@ apidoc_separate_modules = True
 apidoc_extra_args = ["-d 6"]
 
 # mock imports
+# numpy, pandas and matplotlib are not included as these are installed on 
+# ReadTheDocs PYTHON_VERSION_39 docker image (https://hub.docker.com/r/readthedocs/build/dockerfile/)
 autodoc_mock_imports = [
-    "pandas",
     "sklearn",
     "skimage",
     "requests",
@@ -89,16 +100,19 @@ autodoc_mock_imports = [
     "PIL",
     "tensorflow",
     "spacy",
-    "numpy",
     "tensorflow_probability",
     "scipy",
-    "matplotlib",
-    "fbprophet",
+    "prophet",
     "torch",
     "transformers",
     "tqdm",
     "dill",
-    "numba"
+    "joblib",
+    "numba",
+    "pydantic",
+    "toml",
+    "catalogue",
+    "pykeops"
 ]
 
 # Napoleon settings
@@ -131,7 +145,7 @@ master_doc = "index"
 #
 # This is also used if you do content translation via gettext catalogs.
 # Usually you set "language" from the command line for these cases.
-language = None
+language = "en"
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
@@ -161,7 +175,7 @@ html_theme_options = {"logo_only": True}
 html_static_path = ["_static"]
 
 # override default theme width
-html_css_files = ['theme_overrides.css'] # override wide tables in RTD theme
+html_css_files = ['theme_overrides.css', 'custom_docs.css'] # override wide tables in RTD theme
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.
@@ -195,6 +209,8 @@ latex_elements = {
     'preamble': r''' 
         \DeclareUnicodeCharacter{2588}{=}
         \DeclareUnicodeCharacter{258E}{|} 
+        \DeclareUnicodeCharacter{274C}{$\times$} 
+        \DeclareUnicodeCharacter{2705}{$\checkmark$} 
 
         \usepackage{enumitem}
         \setlistdepth{99}
@@ -246,23 +262,17 @@ epub_exclude_files = ["search.html"]
 # -- Options for intersphinx extension ---------------------------------------
 
 # Example configuration for intersphinx: refer to the Python standard library.
-intersphinx_mapping = {"https://docs.python.org/": None}
+intersphinx_mapping = {
+        'python': ('https://docs.python.org/', None),
+        'sklearn': ('https://scikit-learn.org/stable/', None),
+        }
 
 # -- Options for todo extension ----------------------------------------------
 
 # If true, `todo` and `todoList` produce output, else they produce nothing.
 todo_include_todos = True
 
-# from https://github.com/vidartf/nbsphinx-link/blob/master/docs/source/conf.py
-
-# Ensure env.metadata[env.docname]['nbsphinx-link-target']
-# points relative to repo root:
-import os
-
-here = os.path.dirname(__file__)
-repo = os.path.join(here, "..", "..")
-nbsphinx_link_target_root = repo
-
+# -- nbsphinx prolog ---------------------------------------------------------
 # from https://github.com/vidartf/nbsphinx-link/blob/master/docs/source/conf.py for custom tags
 import subprocess
 
@@ -278,11 +288,7 @@ if git_rev:
 
 nbsphinx_prolog = (
     r"""
-{% if env.metadata[env.docname]['nbsphinx-link-target'] %}
-{% set docpath = env.metadata[env.docname]['nbsphinx-link-target'] %}
-{% else %}
-{% set docpath = env.doc2path(env.docname, base='doc/source/') %}
-{% endif %}
+{% set docname = env.doc2path(env.docname, base=False) %}
 
 .. only:: html
 
@@ -290,12 +296,13 @@ nbsphinx_prolog = (
         :format: html
     
     .. nbinfo::
-        This page was generated from `{{ docpath }}`__.
+        This page was generated from `{{ docname }}`__.
     
     __ https://github.com/SeldonIO/alibi-detect/blob/
         """
     + git_rev
-    + r"{{ docpath }}"
+    + "doc/source/"
+    + r"{{ docname }}"
 )
 
 # -- Override order of preference for image formats --------------------------
@@ -309,7 +316,7 @@ StandaloneHTMLBuilder.supported_image_types = [
 ]
 
 # -- myst-parser configuration -----------------------------------------------
-# See https://myst-parser.readthedocs.io/en/latest/syntax/optional.html for 
+# See https://myst-parser.readthedocs.io/en/stable/syntax/optional.html for 
 # details of available extensions.
 myst_enable_extensions = [
     "dollarmath",

@@ -1,8 +1,11 @@
 import logging
-import numpy as np
 import random
-from typing import Dict, Callable, Optional, Tuple, Union
+from typing import Callable, Dict, Optional, Tuple, Union
+
+import numpy as np
 from alibi_detect.utils.sampling import reservoir_sampling
+from alibi_detect.utils.frameworks import Framework
+from alibi_detect.utils._types import TorchDeviceType
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +49,13 @@ def update_reference(X_ref: np.ndarray,
 
 
 def encompass_batching(
-    model: Callable,
-    backend: str,
-    batch_size: int,
-    device: Optional[str] = None,
-    preprocess_batch_fn: Optional[Callable] = None,
-    tokenizer: Optional[Callable] = None,
-    max_len: Optional[int] = None,
+        model: Callable,
+        backend: str,
+        batch_size: int,
+        device: TorchDeviceType = None,
+        preprocess_batch_fn: Optional[Callable] = None,
+        tokenizer: Optional[Callable] = None,
+        max_len: Optional[int] = None,
 ) -> Callable:
     """
     Takes a function that must be batch evaluated (on tokenized input) and returns a function
@@ -62,23 +65,23 @@ def encompass_batching(
     backend = backend.lower()
     kwargs = {'batch_size': batch_size, 'tokenizer': tokenizer, 'max_len': max_len,
               'preprocess_batch_fn': preprocess_batch_fn}
-    if backend == 'tensorflow':
+    if backend == Framework.TENSORFLOW:
         from alibi_detect.cd.tensorflow.preprocess import preprocess_drift
-    elif backend == 'pytorch':
-        from alibi_detect.cd.pytorch.preprocess import preprocess_drift  # type: ignore
+    elif backend == Framework.PYTORCH:
+        from alibi_detect.cd.pytorch.preprocess import preprocess_drift  # type: ignore[assignment]
         kwargs['device'] = device
     else:
         raise NotImplementedError(f'{backend} not implemented. Use tensorflow or pytorch instead.')
 
     def model_fn(x: Union[np.ndarray, list]) -> np.ndarray:
-        return preprocess_drift(x, model, **kwargs)  # type: ignore
+        return preprocess_drift(x, model, **kwargs)  # type: ignore[arg-type]
 
     return model_fn
 
 
 def encompass_shuffling_and_batch_filling(
-    model_fn: Callable,
-    batch_size: int
+        model_fn: Callable,
+        batch_size: int
 ) -> Callable:
     """
     Takes a function that already handles batching but additionally performing shuffling
@@ -96,7 +99,7 @@ def encompass_shuffling_and_batch_filling(
         if final_batch_size != 0:
             doubles_inds = random.choices([i for i in range(n_x)], k=batch_size - final_batch_size)
             if is_np:
-                x = np.concatenate([x, x[doubles_inds]], axis=0)  # type: ignore
+                x = np.concatenate([x, x[doubles_inds]], axis=0)  # type: ignore[call-overload]
             else:
                 x += [x[i] for i in doubles_inds]
         # remove any extras and unshuffle
